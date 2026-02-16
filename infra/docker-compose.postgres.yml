@@ -1,0 +1,14 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: voiceagent_postgres
+    environment:
+      POSTGRES_DB: voiceagent
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: Alibhai@1213!
+    ports:
+      - "5432:5432"
+    volumes:
+      - voiceagent_pg:/var/lib/postgresql/data
+volumes:
+  voiceagent_pg:

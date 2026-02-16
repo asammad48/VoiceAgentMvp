@@ -1,0 +1,101 @@
+{
+  "FE": {
+    "name": "Final Expense",
+    "allowedIntents": [
+      "greet",
+      "consent",
+      "qualify",
+      "handle_objection",
+      "set_callback",
+      "transfer",
+      "dncl",
+      "end"
+    ],
+    "requiredFields": [
+      "state",
+      "age_range",
+      "has_coverage",
+      "callback_time"
+    ],
+    "bannedPhrases": [
+      "guaranteed",
+      "free",
+      "government",
+      "medicare office",
+      "approved for sure",
+      "$"
+    ],
+    "systemAddon": "Campaign = Final Expense (FE). Goal = qualify and schedule a licensed agent callback. Do NOT quote prices or guarantee approval. Do NOT pressure. If asked for price/benefits, offer licensed callback.",
+    "script": [
+      "Open: Hi, is this {lead_name}? My name is {agent_name}. I'm calling about your final expense coverage request. Is now a bad time?",
+      "Qualify: What state are you in? What age range fits you best: 50\u201364, 65\u201374, or 75+? Do you already have any coverage in place?",
+      "Close: Thanks. I'll have a licensed agent call you back to review options. What's a good callback time today or tomorrow?"
+    ]
+  },
+  "ACA": {
+    "name": "ACA Marketplace",
+    "allowedIntents": [
+      "greet",
+      "consent",
+      "qualify",
+      "handle_objection",
+      "set_callback",
+      "transfer",
+      "dncl",
+      "end"
+    ],
+    "requiredFields": [
+      "state",
+      "household_size",
+      "income_range",
+      "has_coverage",
+      "callback_time"
+    ],
+    "bannedPhrases": [
+      "guaranteed",
+      "free plan",
+      "government program",
+      "you qualify for",
+      "$"
+    ],
+    "systemAddon": "Campaign = ACA health coverage assistance. Goal = eligibility pre-check and schedule licensed specialist. Do NOT promise subsidies or coverage. Do NOT give medical advice.",
+    "script": [
+      "Open: Hi {lead_name}, this is {agent_name}. I'm calling about health coverage options through the marketplace. Is now a bad time?",
+      "Qualify: What state are you in? How many people are in your household? Do you currently have coverage? What income range fits best?",
+      "Close: Thanks. I'll schedule a licensed specialist to call you back. What time works today or tomorrow?"
+    ]
+  },
+  "MEDICARE": {
+    "name": "Medicare Review",
+    "allowedIntents": [
+      "greet",
+      "consent",
+      "qualify",
+      "handle_objection",
+      "set_callback",
+      "transfer",
+      "dncl",
+      "end"
+    ],
+    "requiredFields": [
+      "state",
+      "has_medicare",
+      "parts_ab",
+      "callback_time"
+    ],
+    "bannedPhrases": [
+      "medicare",
+      "from medicare",
+      "government",
+      "official",
+      "guaranteed",
+      "$"
+    ],
+    "systemAddon": "Campaign = Medicare plan review scheduling. Never claim to be Medicare/government. Do NOT recommend specific plans. Only qualify and schedule a licensed Medicare agent callback.",
+    "script": [
+      "Open: Hi {lead_name}, this is {agent_name}. I'm calling about a Medicare plan review request. Is now a bad time?",
+      "Qualify: What state are you in? Are you currently on Medicare Part A and B? (Yes/No/Not sure)",
+      "Close: Thanks. I'll have a licensed Medicare agent call you back for a quick review. What callback time works today or tomorrow?"
+    ]
+  }
+}

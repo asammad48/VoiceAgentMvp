@@ -1,0 +1,9 @@
+Copy these files into /etc/asterisk/ on your WSL Ubuntu (backup first).
+
+sudo cp http.conf /etc/asterisk/http.conf
+sudo cp ari.conf /etc/asterisk/ari.conf
+sudo cp pjsip.conf /etc/asterisk/pjsip.conf
+sudo cp extensions.conf /etc/asterisk/extensions.conf
+
+sudo service asterisk restart
+asterisk -rvvv
