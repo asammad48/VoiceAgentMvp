@@ -10,6 +10,7 @@ public sealed class AsteriskAriTelephonyControl : ITelephonyControl
 {
     private readonly ILogger<AsteriskAriTelephonyControl> _log;
     private readonly AriClient _ari;
+    private readonly IVoiceAgentApiClient _api;
     private readonly Func<int, IAudioTransport> _audioFactory;
     private readonly Func<IAudioTransport, ConversationOrchestrator> _orchFactory;
 
@@ -20,22 +21,33 @@ public sealed class AsteriskAriTelephonyControl : ITelephonyControl
     private readonly string? _outboundEndpoint;
     private readonly string? _outboundCallerId;
 
+    private readonly string _defaultCampaign;
+    private readonly Guid? _defaultAgentId;
+    private readonly Guid? _tenantId;
+    private readonly Dictionary<string, string> _campaignByDid;
+
     // ✅ Prevent double-processing and recursion loops
     private readonly ConcurrentDictionary<string, byte> _active = new();
 
     public AsteriskAriTelephonyControl(
         ILogger<AsteriskAriTelephonyControl> log,
         AriClient ari,
+        IVoiceAgentApiClient api,
         Func<int, IAudioTransport> audioFactory,
         Func<IAudioTransport, ConversationOrchestrator> orchFactory,
         string appName,
         string windowsIp,
         int port,
         string? outboundEndpoint,
-        string? outboundCallerId)
+        string? outboundCallerId,
+        string defaultCampaign,
+        Guid? defaultAgentId,
+        Guid? tenantId,
+        Dictionary<string, string> campaignByDid)
     {
         _log = log;
         _ari = ari;
+        _api = api;
         _audioFactory = audioFactory;
         _orchFactory = orchFactory;
         _appName = appName;
@@ -43,6 +55,10 @@ public sealed class AsteriskAriTelephonyControl : ITelephonyControl
         _port = port;
         _outboundEndpoint = outboundEndpoint;
         _outboundCallerId = outboundCallerId;
+        _defaultCampaign = defaultCampaign;
+        _defaultAgentId = defaultAgentId;
+        _tenantId = tenantId;
+        _campaignByDid = campaignByDid;
     }
 
     public async Task RunAsync(CancellationToken ct)
@@ -52,7 +68,7 @@ public sealed class AsteriskAriTelephonyControl : ITelephonyControl
         if (!string.IsNullOrWhiteSpace(_outboundEndpoint))
         {
             _log.LogInformation("Originating outbound call to {Endpoint}", _outboundEndpoint);
-            await _ari.OriginateAsync(_outboundEndpoint!, _appName, _outboundCallerId, ct);
+            await _ari.OriginateAsync(_outboundEndpoint!, _appName, _outboundCallerId, null, ct);
         }
 
         await foreach (var ev in _ari.ReadEventsAsync(ct))
@@ -82,7 +98,7 @@ public sealed class AsteriskAriTelephonyControl : ITelephonyControl
             {
                 try
                 {
-                    await HandleCallAsync(id, ct);
+                    await HandleCallAsync(ev.Channel, ct);
                 }
                 catch (Exception ex)
                 {
@@ -96,9 +112,38 @@ public sealed class AsteriskAriTelephonyControl : ITelephonyControl
         }
     }
 
-    private async Task HandleCallAsync(string channelId, CancellationToken ct)
+    private async Task HandleCallAsync(AriChannel channel, CancellationToken ct)
     {
+        var channelId = channel.Id!;
         _log.LogInformation("Handling call channel {ChannelId}", channelId);
+
+        // Try to get variables from channel (outbound)
+        var callIdStr = await _ari.GetVariableAsync(channelId, "CALL_ID", ct);
+        var campaign = await _ari.GetVariableAsync(channelId, "CAMPAIGN", ct);
+
+        Guid callId;
+        if (Guid.TryParse(callIdStr, out var cid))
+        {
+            callId = cid;
+            _log.LogInformation("Found CALL_ID={CallId} and CAMPAIGN={Campaign} from channel variables", callId, campaign);
+        }
+        else
+        {
+            // Inbound call - detect campaign from DID
+            var exten = channel.Dialplan?.Exten ?? "s";
+            var callerNumber = channel.Caller?.Number ?? "unknown";
+
+            if (!_campaignByDid.TryGetValue(exten, out campaign))
+            {
+                campaign = _defaultCampaign;
+            }
+
+            _log.LogInformation("Inbound call detected: Exten={Exten}, Caller={Caller}. Mapping to campaign {Campaign}", exten, callerNumber, campaign);
+
+            // Create call record
+            callId = await _api.InboundStartAsync(campaign, callerNumber, _defaultAgentId, _tenantId, ct);
+            _log.LogInformation("Created inbound call record: {CallId}", callId);
+        }
 
         await _ari.AnswerAsync(channelId, ct);
 
@@ -118,6 +163,6 @@ public sealed class AsteriskAriTelephonyControl : ITelephonyControl
             channelId, extChanId, bridgeId);
 
         var orch = _orchFactory(audio);
-        await orch.RunAsync(ct);
+        await orch.RunAsync(callId, campaign ?? _defaultCampaign, ct);
     }
 }

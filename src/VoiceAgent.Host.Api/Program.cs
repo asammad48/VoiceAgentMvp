@@ -193,6 +193,92 @@ app.MapPost("/v1/calls/start", async ([FromBody] StartCallRequest req, TenantCon
     return Results.Ok(call);
 }).WithOpenApi();
 
+app.MapPost("/v1/calls/inbound-start", async (
+    [FromBody] InboundStartRequest req,
+    TenantContext tenant,
+    AppDbContext db) =>
+{
+    var tid = req.TenantId ?? tenant.TenantId;
+
+    var lead = await db.Leads.FirstOrDefaultAsync(x => x.TenantId == tid && x.Phone == req.CallerNumber);
+    if (lead is null)
+    {
+        lead = new Lead
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tid,
+            CampaignCode = req.CampaignCode ?? "FE",
+            Name = "Inbound Caller",
+            Phone = req.CallerNumber,
+            Status = CallStatus.New
+        };
+        db.Leads.Add(lead);
+    }
+
+    var agentId = req.AgentId;
+    if (agentId == null || agentId == Guid.Empty)
+    {
+        var agent = await db.Agents.FirstOrDefaultAsync(x => x.TenantId == tid);
+        agentId = agent?.Id ?? Guid.Empty;
+    }
+
+    var call = new Call
+    {
+        Id = Guid.NewGuid(),
+        TenantId = tid,
+        LeadId = lead.Id,
+        AgentId = agentId.Value,
+        CampaignCode = req.CampaignCode ?? lead.CampaignCode,
+        Status = CallStatus.Started
+    };
+
+    db.Calls.Add(call);
+    await db.SaveChangesAsync();
+
+    return Results.Ok(new { callId = call.Id });
+}).WithOpenApi();
+
+app.MapPost("/v1/calls/{callId:guid}/intro", async (
+    Guid callId,
+    TenantContext tenant,
+    AppDbContext db,
+    CampaignRegistry registry) =>
+{
+    var call = await db.Calls.FirstOrDefaultAsync(x => x.TenantId == tenant.TenantId && x.Id == callId);
+    if (call is null) return Results.NotFound(new { error = "call not found" });
+
+    var lead = await db.Leads.FirstAsync(x => x.TenantId == tenant.TenantId && x.Id == call.LeadId);
+    var agent = await db.Agents.FirstAsync(x => x.TenantId == tenant.TenantId && x.Id == call.AgentId);
+
+    var profile = registry.Get(call.CampaignCode);
+    var scriptLine = profile.Script.FirstOrDefault(s => s.StartsWith("Open:", StringComparison.OrdinalIgnoreCase))
+                     ?? profile.Script.FirstOrDefault() ?? "";
+
+    var pitch = scriptLine.Replace("Open:", "", StringComparison.OrdinalIgnoreCase).Trim();
+    pitch = pitch.Replace("{lead_name}", lead.Name, StringComparison.OrdinalIgnoreCase)
+                 .Replace("{agent_name}", agent.DisplayName, StringComparison.OrdinalIgnoreCase);
+
+    var action = new AgentAction
+    {
+        Say = pitch,
+        Intent = "greet",
+        NextStep = "listen for response",
+        Fields = new Dictionary<string, string>()
+    };
+
+    db.CallTurns.Add(new CallTurn
+    {
+        Id = Guid.NewGuid(),
+        TenantId = tenant.TenantId,
+        CallId = call.Id,
+        Role = "assistant",
+        Text = action.Say ?? ""
+    });
+
+    await db.SaveChangesAsync();
+    return Results.Ok(action);
+}).WithOpenApi();
+
 // Main "next step" endpoint: send last user transcript -> get agent JSON action (bounded).
 app.MapPost("/v1/calls/{callId:guid}/next", async (
     Guid callId,
@@ -381,6 +467,7 @@ public sealed record CreateTenantRequest(string? Name);
 public sealed record CreateAgentRequest(string? DisplayName, string? DefaultCampaignCode);
 public sealed record CreateLeadRequest(string? CampaignCode, string? Name, string? Phone, string? State);
 public sealed record StartCallRequest(Guid LeadId, Guid AgentId, string? CampaignCode);
+public sealed record InboundStartRequest(string? CampaignCode, string CallerNumber, Guid? AgentId, Guid? TenantId);
 public sealed record NextRequest(string? Transcript, Dictionary<string, string>? Fields);
 public sealed record UpdateStatusRequest(CallStatus Status, string? Notes, bool EndCall = true);
 

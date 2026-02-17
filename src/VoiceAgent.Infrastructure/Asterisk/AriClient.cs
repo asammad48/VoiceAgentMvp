@@ -112,14 +112,49 @@ public sealed class AriClient : IAsyncDisposable
     }
 
 
-    public async Task<string> OriginateAsync(string endpoint, string appName, string? callerId, CancellationToken ct)
+    public async Task<string> OriginateAsync(
+        string endpoint,
+        string appName,
+        string? callerId,
+        Dictionary<string, string>? variables,
+        CancellationToken ct)
     {
-        var qs = new List<string> { $"endpoint={Uri.EscapeDataString(endpoint)}", $"app={Uri.EscapeDataString(appName)}" };
-        if (!string.IsNullOrWhiteSpace(callerId)) qs.Add($"callerId={Uri.EscapeDataString(callerId)}");
-        var resp = await _http.PostAsync(Url($"/ari/channels?{string.Join("&", qs)}"), null, ct);
-        resp.EnsureSuccessStatusCode();
+        var payload = new Dictionary<string, object>
+        {
+            ["endpoint"] = endpoint,
+            ["app"] = appName
+        };
+        if (!string.IsNullOrWhiteSpace(callerId)) payload["callerId"] = callerId;
+        if (variables is not null && variables.Count > 0) payload["variables"] = variables;
+
+        var json = JsonSerializer.Serialize(payload);
+        var resp = await _http.PostAsync(Url("/ari/channels"), new StringContent(json, Encoding.UTF8, "application/json"), ct);
+
+        if (!resp.IsSuccessStatusCode)
+        {
+            var err = await resp.Content.ReadAsStringAsync(ct);
+            _log.LogError("Originate failed: {Error}", err);
+            resp.EnsureSuccessStatusCode();
+        }
+
         using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
         return doc.RootElement.GetProperty("id").GetString() ?? throw new Exception("Channel id missing");
+    }
+
+    public async Task<string?> GetVariableAsync(string channelId, string variable, CancellationToken ct)
+    {
+        try
+        {
+            var resp = await _http.GetAsync(Url($"/ari/channels/{Uri.EscapeDataString(channelId)}/variable?variable={Uri.EscapeDataString(variable)}"), ct);
+            if (!resp.IsSuccessStatusCode) return null;
+
+            using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
+            return doc.RootElement.GetProperty("value").GetString();
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     public async ValueTask DisposeAsync()

@@ -45,6 +45,19 @@ var host = Host.CreateDefaultBuilder(args)
 
         services.AddSingleton<IVadDetector>(_ => new SimpleEnergyVad());
 
+        services.AddHttpClient<IVoiceAgentApiClient, VoiceAgentApiClient>((sp, client) =>
+        {
+            var apiBase = cfg["Api:BaseUrl"] ?? "http://localhost:5000";
+            client.BaseAddress = new Uri(apiBase);
+        }).ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler());
+
+        services.AddSingleton<IVoiceAgentApiClient>(sp =>
+        {
+            var log = sp.GetRequiredService<ILogger<VoiceAgentApiClient>>();
+            var http = sp.GetRequiredService<IHttpClientFactory>().CreateClient(typeof(IVoiceAgentApiClient).FullName!);
+            return new VoiceAgentApiClient(log, http, cfg["Inbound:TenantId"] ?? Guid.Empty.ToString());
+        });
+
         services.AddSingleton<Func<int, IAudioTransport>>(sp => port =>
         {
             var log = sp.GetRequiredService<ILogger<RtpAudioTransport>>();
@@ -58,7 +71,7 @@ var host = Host.CreateDefaultBuilder(args)
                 log,
                 audio,
                 sp.GetRequiredService<ISttProvider>(),
-                sp.GetRequiredService<ILlmProvider>(),
+                sp.GetRequiredService<IVoiceAgentApiClient>(),
                 sp.GetRequiredService<ITtsProvider>(),
                 sp.GetRequiredService<IVadDetector>());
         });
@@ -67,6 +80,7 @@ var host = Host.CreateDefaultBuilder(args)
         {
             var log = sp.GetRequiredService<ILogger<AsteriskAriTelephonyControl>>();
             var ari = sp.GetRequiredService<AriClient>();
+            var api = sp.GetRequiredService<IVoiceAgentApiClient>();
             var audioFactory = sp.GetRequiredService<Func<int, IAudioTransport>>();
             var orchFactory = sp.GetRequiredService<Func<IAudioTransport, ConversationOrchestrator>>();
             var appName = cfg["Asterisk:StasisApp"]!;
@@ -75,7 +89,16 @@ var host = Host.CreateDefaultBuilder(args)
             var outboundEnabled = bool.TryParse(cfg["Outbound:Enabled"], out var b) && b;
             var outboundEndpoint = outboundEnabled ? cfg["Outbound:Endpoint"] : null;
             var callerId = outboundEnabled ? cfg["Outbound:CallerId"] : null;
-            return new AsteriskAriTelephonyControl(log, ari, audioFactory, orchFactory, appName, ip, port, outboundEndpoint, callerId);
+
+            var inboundCfg = cfg.GetSection("Inbound");
+            var defaultCampaign = inboundCfg["DefaultCampaign"] ?? "FE";
+            var defaultAgentId = Guid.TryParse(inboundCfg["DefaultAgentId"], out var agId) ? agId : (Guid?)null;
+            var tenantId = Guid.TryParse(inboundCfg["TenantId"], out var tid) ? tid : (Guid?)null;
+            var campaignByDid = inboundCfg.GetSection("CampaignByDid").Get<Dictionary<string, string>>() ?? new();
+
+            return new AsteriskAriTelephonyControl(
+                log, ari, api, audioFactory, orchFactory, appName, ip, port,
+                outboundEndpoint, callerId, defaultCampaign, defaultAgentId, tenantId, campaignByDid);
         });
 
         services.AddHostedService<Worker>();
