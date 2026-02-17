@@ -1,6 +1,8 @@
 using Microsoft.Extensions.Logging;
-using VoiceAgent.Domain.Models.Conversation;
+using VoiceAgent.Domain.Models.Api;
+using VoiceAgent.Domain.Models.Audio;
 using VoiceAgent.Domain.Ports;
+using System.Diagnostics;
 
 namespace VoiceAgent.Application.Orchestration;
 
@@ -9,161 +11,224 @@ public sealed class ConversationOrchestrator
     private readonly ILogger<ConversationOrchestrator> _log;
     private readonly IAudioTransport _audio;
     private readonly ISttProvider _stt;
-    private readonly ILlmProvider _llm;
     private readonly ITtsProvider _tts;
     private readonly IVadDetector _vad;
+    private readonly IVoiceAgentApiClient _api;
 
     private readonly TimeSpan _silenceToFinalize = TimeSpan.FromMilliseconds(900);
-    private readonly TimeSpan _minListenAfterBargeIn = TimeSpan.FromMilliseconds(700);
+    private readonly TimeSpan _callTimeout = TimeSpan.FromSeconds(30);
+    private readonly TimeSpan _introBargeInGrace = TimeSpan.FromMilliseconds(300);
+    private readonly TimeSpan _maxCallDuration = TimeSpan.FromMinutes(10);
 
     public ConversationOrchestrator(
         ILogger<ConversationOrchestrator> log,
         IAudioTransport audio,
         ISttProvider stt,
-        ILlmProvider llm,
         ITtsProvider tts,
-        IVadDetector vad)
+        IVadDetector vad,
+        IVoiceAgentApiClient api)
     {
         _log = log;
         _audio = audio;
         _stt = stt;
-        _llm = llm;
         _tts = tts;
         _vad = vad;
+        _api = api;
     }
 
-    public async Task RunAsync(CancellationToken ct)
+    public async Task RunAsync(CallDto call, CancellationToken ct)
     {
-        var turns = new List<ChatTurn>
+        _log.LogInformation("Starting hardened conversation for call {CallId} (Campaign: {Campaign})", call.Id, call.CampaignCode);
+
+        using var callTimeoutCts = new CancellationTokenSource(_maxCallDuration);
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, callTimeoutCts.Token);
+        var token = linkedCts.Token;
+
+        try
         {
-            new(ChatRole.System, "You are a concise phone-call voice agent. Keep replies short and clear.")
-        };
+            await _stt.StartAsync(token);
 
-        await _stt.StartAsync(ct);
+            var pumpTask = PumpAudioToSttAsync(token);
 
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        var pump = PumpAudioToSttAsync(linked.Token);
-        var loop = HandleTranscriptsAsync(turns, linked.Token);
-        await Task.WhenAll(pump, loop);
+            // Initial intro pitch
+            if (!string.IsNullOrWhiteSpace(call.IntroPitch))
+            {
+                var intro = call.IntroPitch.Replace("{lead_name}", call.LeadName).Replace("{agent_name}", call.AgentName);
+                await PlayIntroAsync(intro, token);
+            }
+
+            var loopTask = HandleTranscriptsAsync(call, token);
+
+            await Task.WhenAny(pumpTask, loopTask);
+        }
+        catch (OperationCanceledException) when (callTimeoutCts.IsCancellationRequested)
+        {
+            _log.LogWarning("Max call duration reached for {CallId}", call.Id);
+            await _api.UpdateStatusAsync(call.TenantId, call.Id, CallStatusDto.Completed, "Max duration reached", true, CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "Unexpected error in conversation {CallId}", call.Id);
+            await _api.UpdateStatusAsync(call.TenantId, call.Id, CallStatusDto.Failed, ex.Message, true, CancellationToken.None);
+        }
+        finally
+        {
+            _audio.StopSending();
+            await _api.UpdateStatusAsync(call.TenantId, call.Id, CallStatusDto.Completed, "Finalized", true, CancellationToken.None);
+            _log.LogInformation("Hardened conversation finalized for call {CallId}", call.Id);
+        }
     }
 
     private async Task PumpAudioToSttAsync(CancellationToken ct)
     {
-        await foreach (var frame in _audio.ReceiveAsync(ct))
+        try
         {
-            _ = _vad.IsSpeech(frame);
-            await _stt.SendAudioAsync(frame, ct);
-        }
-    }
-
-    private async Task HandleTranscriptsAsync(List<ChatTurn> turns, CancellationToken ct)
-    {
-        string lastFinal = "";
-        var lastFinalAt = DateTimeOffset.MinValue;
-
-        CancellationTokenSource? speakCts = null;
-        var speaking = false;
-        var lastBargeInAt = DateTimeOffset.MinValue;
-
-
-        Task? finalizeTask = null;
-        CancellationTokenSource? finalizeCts = null;
-
-        await foreach (var upd in _stt.GetUpdatesAsync(ct))
-        {
-            if (upd.IsFinal && !string.IsNullOrWhiteSpace(upd.Text))
+            await foreach (var frame in _audio.ReceiveAsync(ct))
             {
-                lastFinal = upd.Text.Trim();
-                _log.LogInformation("STT final: {Text}", lastFinal);
-
-                // reset finalize timer
-                finalizeCts?.Cancel();
-                finalizeCts?.Dispose();
-                finalizeCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-
-                var localToken = finalizeCts.Token;
-                finalizeTask = Task.Run(async () =>
-                {
-                    try
-                    {
-                        await Task.Delay(_silenceToFinalize, localToken);
-                        if (localToken.IsCancellationRequested) return;
-
-                        // finalize here
-                        var userText = lastFinal;
-                        lastFinal = "";
-
-                        turns.Add(new(ChatRole.User, userText));
-                        var reply = (await _llm.CompleteAsync(turns, ct)).Trim();
-                        if (reply.Length == 0) reply = "Sorry, could you repeat that?";
-                        turns.Add(new(ChatRole.Assistant, reply));
-
-                        await foreach (var outFrame in _tts.SynthesizeMuLawAsync(reply, ct))
-                            await _audio.SendAsync(outFrame, ct);
-                    }
-                    catch (OperationCanceledException) { }
-                }, ct);
+                _vad.IsSpeech(frame);
+                await _stt.SendAudioAsync(frame, ct);
             }
         }
+        catch (OperationCanceledException) { }
+    }
 
-        //await foreach (var upd in _stt.GetUpdatesAsync(ct))
-        //{
-        //    Console.WriteLine($"Handle transcript {upd.Text}");
-        //    if (speaking && !upd.IsFinal && !string.IsNullOrWhiteSpace(upd.Text))
-        //    {
-        //        _log.LogInformation("BARGE-IN detected. Stopping TTS.");
-        //        _audio.StopSending();
-        //        speakCts?.Cancel();
-        //        speaking = false;
-        //        lastBargeInAt = DateTimeOffset.UtcNow;
-        //        lastFinal = "";
-        //        continue;
-        //    }
-        //    Console.WriteLine($"loop passed");
-        //    if (upd.IsFinal && !string.IsNullOrWhiteSpace(upd.Text))
-        //    {
-        //        lastFinal = upd.Text.Trim();
-        //        lastFinalAt = DateTimeOffset.UtcNow;
-        //        _log.LogInformation("STT final: {Text}", lastFinal);
-        //    }
-        //    Console.WriteLine($"Handle transcript {upd.Text}");
-        //    if (!string.IsNullOrEmpty(lastFinal) && lastFinalAt != DateTimeOffset.MinValue)
-        //    {
-        //        Console.WriteLine($"in if Handle transcript {upd.Text}");
-        //        if (DateTimeOffset.UtcNow - lastFinalAt >= _silenceToFinalize)
-        //        {
-        //            Console.WriteLine($"in if if Handle transcript {upd.Text}");
-        //            if (DateTimeOffset.UtcNow - lastBargeInAt < _minListenAfterBargeIn)
-        //                continue;
-        //            Console.WriteLine($"passed if Handle transcript {upd.Text}");
-        //            var userText = lastFinal;
-        //            lastFinal = "";
+    private async Task PlayIntroAsync(string intro, CancellationToken ct)
+    {
+        _log.LogInformation("Playing intro: {Intro}", intro);
 
-        //            turns.Add(new(ChatRole.User, userText));
-        //            var reply = (await _llm.CompleteAsync(turns, ct)).Trim();
-        //            if (reply.Length == 0) reply = "Sorry, could you repeat that?";
-        //            turns.Add(new(ChatRole.Assistant, reply));
+        using var introCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var ttsTask = Task.Run(async () =>
+        {
+            try
+            {
+                await foreach (var outFrame in _tts.SynthesizeMuLawAsync(intro, introCts.Token))
+                {
+                    await _audio.SendAsync(outFrame, introCts.Token);
+                }
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception ex)
+            {
+                _log.LogError(ex, "TTS failure during intro");
+            }
+        }, ct);
 
-        //            speakCts?.Dispose();
-        //            speakCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        //            speaking = true;
+        var start = DateTimeOffset.UtcNow;
+        try
+        {
+            await foreach (var upd in _stt.GetUpdatesAsync(introCts.Token))
+            {
+                if (ttsTask.IsCompleted) break;
 
-        //            try
-        //            {
-        //                Console.WriteLine(reply);
-        //                await foreach (var outFrame in _tts.SynthesizeMuLawAsync(reply, speakCts.Token))
-        //                    await _audio.SendAsync(outFrame, speakCts.Token);
-        //            }
-        //            catch (OperationCanceledException)
-        //            {
-        //                _log.LogInformation("TTS cancelled.");
-        //            }
-        //            finally
-        //            {
-        //                speaking = false;
-        //            }
-        //        }
-        //    }
-        //}
+                bool bargeIn = !string.IsNullOrWhiteSpace(upd.Text) || _vad.IsSpeech(new MuLawFrame(new byte[0], 8000, 1, 0));
+                if (bargeIn && (DateTimeOffset.UtcNow - start > _introBargeInGrace))
+                {
+                    _log.LogInformation("Barge-in detected during intro (STT or VAD).");
+                    _audio.StopSending();
+                    introCts.Cancel();
+                    break;
+                }
+            }
+            await ttsTask;
+        }
+        catch (OperationCanceledException) { }
+    }
+
+    private async Task HandleTranscriptsAsync(CallDto call, CancellationToken ct)
+    {
+        var lastActivityAt = DateTimeOffset.UtcNow;
+        var fields = new Dictionary<string, string>();
+        CancellationTokenSource? speakCts = null;
+        bool isProcessing = false;
+
+        try
+        {
+            await foreach (var upd in _stt.GetUpdatesAsync(ct))
+            {
+                if (!string.IsNullOrWhiteSpace(upd.Text))
+                {
+                    lastActivityAt = DateTimeOffset.UtcNow;
+                    if (speakCts != null && !speakCts.IsCancellationRequested)
+                    {
+                        _log.LogInformation("Barge-in: stopping agent speech.");
+                        _audio.StopSending();
+                        speakCts.Cancel();
+                    }
+                }
+
+                if (upd.IsFinal && !string.IsNullOrWhiteSpace(upd.Text))
+                {
+                    isProcessing = true;
+                    try
+                    {
+                        var userText = upd.Text.Trim();
+                        var sw = Stopwatch.StartNew();
+                        var action = await _api.GetNextActionAsync(call.TenantId, call.Id, userText, fields, ct);
+                        sw.Stop();
+                        _log.LogInformation("LLM Latency: {Ms}ms", sw.ElapsedMilliseconds);
+
+                        if (action.Fields != null)
+                        {
+                            foreach (var kv in action.Fields) fields[kv.Key] = kv.Value;
+                        }
+
+                        if (!string.IsNullOrWhiteSpace(action.Say))
+                        {
+                            speakCts?.Dispose();
+                            speakCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                            var localToken = speakCts.Token;
+
+                            _ = Task.Run(async () =>
+                            {
+                                try
+                                {
+                                    await foreach (var outFrame in _tts.SynthesizeMuLawAsync(action.Say, localToken))
+                                    {
+                                        await _audio.SendAsync(outFrame, localToken);
+                                        lastActivityAt = DateTimeOffset.UtcNow;
+                                    }
+                                }
+                                catch (OperationCanceledException) { }
+                                catch (Exception ex)
+                                {
+                                    _log.LogError(ex, "TTS Provider failure");
+                                }
+                            }, ct);
+                        }
+
+                        if (action.Intent?.ToLowerInvariant() == "end" || action.Intent?.ToLowerInvariant() == "dncl")
+                        {
+                            await Task.Delay(2000, ct);
+                            break;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _log.LogError(ex, "LLM Provider failure");
+                        await foreach (var f in _tts.SynthesizeMuLawAsync("I am sorry, I am having trouble connecting. Let me call you back.", ct))
+                        {
+                            await _audio.SendAsync(f, ct);
+                        }
+                        break;
+                    }
+                    finally
+                    {
+                        isProcessing = false;
+                        lastActivityAt = DateTimeOffset.UtcNow;
+                    }
+                }
+
+                if (!isProcessing && (DateTimeOffset.UtcNow - lastActivityAt > _callTimeout))
+                {
+                    _log.LogInformation("Silence timeout reached.");
+                    break;
+                }
+            }
+        }
+        catch (OperationCanceledException) { }
+        finally
+        {
+            speakCts?.Dispose();
+        }
     }
 }

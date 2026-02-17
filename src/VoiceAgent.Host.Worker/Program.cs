@@ -51,6 +51,11 @@ var host = Host.CreateDefaultBuilder(args)
             return new RtpAudioTransport(log, port);
         });
 
+        services.AddHttpClient<IVoiceAgentApiClient, VoiceAgentApiClient>(http =>
+        {
+            http.BaseAddress = new Uri(cfg["Api:BaseUrl"]!);
+        });
+
         services.AddSingleton<Func<IAudioTransport, ConversationOrchestrator>>(sp => audio =>
         {
             var log = sp.GetRequiredService<ILogger<ConversationOrchestrator>>();
@@ -58,9 +63,9 @@ var host = Host.CreateDefaultBuilder(args)
                 log,
                 audio,
                 sp.GetRequiredService<ISttProvider>(),
-                sp.GetRequiredService<ILlmProvider>(),
                 sp.GetRequiredService<ITtsProvider>(),
-                sp.GetRequiredService<IVadDetector>());
+                sp.GetRequiredService<IVadDetector>(),
+                sp.GetRequiredService<IVoiceAgentApiClient>());
         });
 
         services.AddSingleton<ITelephonyControl>(sp =>
@@ -69,13 +74,20 @@ var host = Host.CreateDefaultBuilder(args)
             var ari = sp.GetRequiredService<AriClient>();
             var audioFactory = sp.GetRequiredService<Func<int, IAudioTransport>>();
             var orchFactory = sp.GetRequiredService<Func<IAudioTransport, ConversationOrchestrator>>();
+            var api = sp.GetRequiredService<IVoiceAgentApiClient>();
             var appName = cfg["Asterisk:StasisApp"]!;
             var ip = cfg["Media:WindowsListenIp"]!;
             var port = int.Parse(cfg["Media:WindowsListenPort"]!);
             var outboundEnabled = bool.TryParse(cfg["Outbound:Enabled"], out var b) && b;
             var outboundEndpoint = outboundEnabled ? cfg["Outbound:Endpoint"] : null;
             var callerId = outboundEnabled ? cfg["Outbound:CallerId"] : null;
-            return new AsteriskAriTelephonyControl(log, ari, audioFactory, orchFactory, appName, ip, port, outboundEndpoint, callerId);
+
+            var tidStr = cfg["Outbound:TenantId"];
+            Guid.TryParse(tidStr, out var tid);
+            var aidStr = cfg["Outbound:DefaultAgentId"];
+            Guid.TryParse(aidStr, out var aid);
+
+            return new AsteriskAriTelephonyControl(log, ari, audioFactory, orchFactory, api, appName, ip, port, outboundEndpoint, callerId, tid, aid);
         });
 
         services.AddHostedService<Worker>();
@@ -88,10 +100,45 @@ public sealed class Worker : BackgroundService
 {
     private readonly ILogger<Worker> _log;
     private readonly ITelephonyControl _telephony;
-    public Worker(ILogger<Worker> log, ITelephonyControl telephony) { _log = log; _telephony = telephony; }
+    private readonly IVoiceAgentApiClient _api;
+    private readonly IConfiguration _cfg;
+
+    public Worker(ILogger<Worker> log, ITelephonyControl telephony, IVoiceAgentApiClient api, IConfiguration cfg)
+    {
+        _log = log;
+        _telephony = telephony;
+        _api = api;
+        _cfg = cfg;
+    }
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _log.LogInformation("Worker started.");
-        await _telephony.RunAsync(stoppingToken);
+
+        var tenantIdStr = _cfg["Outbound:TenantId"];
+        Guid.TryParse(tenantIdStr, out var tenantId);
+
+        _ = Task.Run(() => _telephony.RunAsync(stoppingToken), stoppingToken);
+
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            try
+            {
+                if (tenantId != Guid.Empty)
+                {
+                    var call = await _api.ClaimNextCallAsync(tenantId, stoppingToken);
+                    if (call != null)
+                    {
+                        await _telephony.TriggerOutboundAsync(call, stoppingToken);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _log.LogError(ex, "Error in worker polling loop");
+            }
+
+            await Task.Delay(2000, stoppingToken);
+        }
     }
 }

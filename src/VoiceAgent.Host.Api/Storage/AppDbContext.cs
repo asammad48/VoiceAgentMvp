@@ -12,6 +12,7 @@ public sealed class AppDbContext : DbContext
     public DbSet<Call> Calls => Set<Call>();
     public DbSet<CallTurn> CallTurns => Set<CallTurn>();
     public DbSet<CallField> CallFields => Set<CallField>();
+    public DbSet<DoNotCall> DoNotCalls => Set<DoNotCall>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -33,5 +34,8 @@ public sealed class AppDbContext : DbContext
 
         b.Entity<CallField>().HasKey(x => x.Id);
         b.Entity<CallField>().HasIndex(x => new { x.TenantId, x.CallId, x.Key });
+
+        b.Entity<DoNotCall>().HasKey(x => x.Id);
+        b.Entity<DoNotCall>().HasIndex(x => new { x.TenantId, x.Phone }).IsUnique();
     }
 }

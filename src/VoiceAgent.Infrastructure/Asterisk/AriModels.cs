@@ -14,4 +14,10 @@ public sealed class AriChannel
     [JsonPropertyName("id")] public string? Id { get; set; }
     [JsonPropertyName("name")] public string? Name { get; set; }
     [JsonPropertyName("channeltype")] public string? Channeltype { get; set; }
+    [JsonPropertyName("dialplan")] public AriDialplan? Dialplan { get; set; }
+}
+
+public sealed class AriDialplan
+{
+    [JsonPropertyName("exten")] public string? Exten { get; set; }
 }

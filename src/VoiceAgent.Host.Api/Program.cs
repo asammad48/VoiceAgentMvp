@@ -14,11 +14,7 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(o =>
 {
-    // Minimal APIs can sometimes generate duplicate ApiDescriptions.
-    // This prevents "Sequence contains more than one matching element".
     o.ResolveConflictingActions(apiDescriptions => apiDescriptions.First());
-
-    // Make operationIds unique/stable (helps swagger + clients)
     o.CustomOperationIds(apiDesc =>
     {
         var method = apiDesc.HttpMethod ?? "GET";
@@ -50,21 +46,17 @@ builder.Services.AddSwaggerGen(o =>
     });
 });
 
-
 builder.Services.AddSingleton<TenantContext>();
 builder.Services.AddSingleton<CampaignRegistry>();
 builder.Services.AddSingleton<PromptBuilder>();
 builder.Services.AddSingleton<ResponseGuard>();
 
-// DB
 builder.Services.AddDbContext<AppDbContext>(opt =>
 {
     opt.UseNpgsql(builder.Configuration.GetConnectionString("Postgres"));
 });
 
-// Providers (API tests only)
 var cfg = builder.Configuration;
-
 builder.Services.AddHttpClient("hf");
 builder.Services.AddSingleton<ILlmProvider>(sp =>
 {
@@ -91,7 +83,6 @@ builder.Services.AddSingleton<DeepgramPrerecordedStt>(sp =>
 
 var app = builder.Build();
 
-// Auto-create DB schema for MVP (no migrations). For production, use migrations.
 using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
@@ -101,11 +92,9 @@ using (var scope = app.Services.CreateScope())
 app.UseSwagger();
 app.UseSwaggerUI();
 app.MapGet("/", () => Results.Redirect("/swagger"));
-
-// Tenancy
 app.UseMiddleware<TenantMiddleware>();
 
-// ========== TENANTS (no header required) ==========
+// ========== TENANTS ==========
 app.MapPost("/v1/tenants", async ([FromBody] CreateTenantRequest req, AppDbContext db) =>
 {
     var t = new Tenant { Id = Guid.NewGuid(), Name = req.Name?.Trim() ?? "Tenant" };
@@ -138,26 +127,25 @@ app.MapGet("/v1/agents", async (TenantContext tenant, AppDbContext db) =>
 // ========== LEADS ==========
 app.MapPost("/v1/leads", async ([FromBody] CreateLeadRequest req, TenantContext tenant, AppDbContext db) =>
 {
+    var phone = req.Phone?.Trim() ?? "";
+    var isDnc = await db.DoNotCalls.AnyAsync(x => x.TenantId == tenant.TenantId && x.Phone == phone);
+
     var lead = new Lead
     {
         Id = Guid.NewGuid(),
         TenantId = tenant.TenantId,
         CampaignCode = (req.CampaignCode ?? "FE").ToUpperInvariant(),
         Name = req.Name?.Trim() ?? "",
-        Phone = req.Phone?.Trim() ?? "",
+        Phone = phone,
         State = req.State?.Trim(),
-        Status = CallStatus.New
+        Status = isDnc ? CallStatus.Dnc : CallStatus.New
     };
     db.Leads.Add(lead);
     await db.SaveChangesAsync();
     return Results.Ok(lead);
 }).WithOpenApi();
 
-app.MapGet("/v1/leads", async (
-    [FromQuery] string? campaign,
-    [FromQuery] CallStatus? status,
-    TenantContext tenant,
-    AppDbContext db) =>
+app.MapGet("/v1/leads", async ([FromQuery] string? campaign, [FromQuery] CallStatus? status, TenantContext tenant, AppDbContext db) =>
 {
     var q = db.Leads.AsQueryable().Where(x => x.TenantId == tenant.TenantId);
     if (!string.IsNullOrWhiteSpace(campaign)) q = q.Where(x => x.CampaignCode == campaign.ToUpper());
@@ -167,14 +155,15 @@ app.MapGet("/v1/leads", async (
 }).WithOpenApi();
 
 // ========== CALLS ==========
-// Start a call record (for Swagger testing / simulation).
 app.MapPost("/v1/calls/start", async ([FromBody] StartCallRequest req, TenantContext tenant, AppDbContext db) =>
 {
     var lead = await db.Leads.FirstOrDefaultAsync(x => x.TenantId == tenant.TenantId && x.Id == req.LeadId);
     if (lead is null) return Results.NotFound(new { error = "lead not found" });
-
     var agent = await db.Agents.FirstOrDefaultAsync(x => x.TenantId == tenant.TenantId && x.Id == req.AgentId);
     if (agent is null) return Results.NotFound(new { error = "agent not found" });
+
+    var isDnc = await db.DoNotCalls.AnyAsync(x => x.TenantId == tenant.TenantId && x.Phone == lead.Phone);
+    if (isDnc) return Results.BadRequest(new { error = "Phone is on DNC list" });
 
     var call = new Call
     {
@@ -182,219 +171,190 @@ app.MapPost("/v1/calls/start", async ([FromBody] StartCallRequest req, TenantCon
         TenantId = tenant.TenantId,
         LeadId = lead.Id,
         AgentId = agent.Id,
+        Direction = req.Direction ?? CallDirection.Outbound,
         CampaignCode = (req.CampaignCode ?? lead.CampaignCode).ToUpperInvariant(),
-        Status = CallStatus.Started
+        InboundUseCaseCode = req.InboundUseCaseCode,
+        PhoneFrom = req.PhoneFrom,
+        PhoneTo = req.PhoneTo ?? lead.Phone,
+        StartReason = req.StartReason ?? "manual",
+        Status = req.Direction == CallDirection.Inbound ? CallStatus.Started : CallStatus.New
     };
-
-    lead.Status = CallStatus.Started;
-
+    lead.Status = call.Status;
     db.Calls.Add(call);
     await db.SaveChangesAsync();
     return Results.Ok(call);
 }).WithOpenApi();
 
-// Main "next step" endpoint: send last user transcript -> get agent JSON action (bounded).
-app.MapPost("/v1/calls/{callId:guid}/next", async (
-    Guid callId,
-    [FromBody] NextRequest req,
-    TenantContext tenant,
-    AppDbContext db,
-    CampaignRegistry registry,
-    PromptBuilder pb,
-    ResponseGuard guard,
-    ILlmProvider llm) =>
+app.MapPost("/v1/calls/claim", async (TenantContext tenant, AppDbContext db, CampaignRegistry registry, IConfiguration config) =>
+{
+    // Max concurrent calls check
+    var maxConcurrent = config.GetValue<int>("MaxConcurrentCalls", 10);
+    var currentActive = await db.Calls.CountAsync(x => x.TenantId == tenant.TenantId && (x.Status == CallStatus.Started || x.Status == CallStatus.Connected));
+    if (currentActive >= maxConcurrent) return Results.Problem("Max concurrent calls reached", statusCode: 429);
+
+    var call = await db.Calls
+        .Where(x => x.TenantId == tenant.TenantId && x.Status == CallStatus.New && x.Direction == CallDirection.Outbound)
+        .OrderBy(x => x.StartedAt)
+        .FirstOrDefaultAsync();
+
+    if (call == null) return Results.NotFound();
+
+    // Check DNC again just before originating
+    var lead = await db.Leads.FirstAsync(l => l.Id == call.LeadId);
+    var isDnc = await db.DoNotCalls.AnyAsync(d => d.TenantId == tenant.TenantId && d.Phone == lead.Phone);
+    if (isDnc)
+    {
+        call.Status = CallStatus.DncBlocked;
+        call.EndedAt = DateTimeOffset.UtcNow;
+        lead.Status = CallStatus.Dnc;
+        await db.SaveChangesAsync();
+        return Results.Conflict(new { error = "DNC Blocked" });
+    }
+
+    call.Status = CallStatus.Started;
+    await db.SaveChangesAsync();
+
+    var profile = registry.Get(call.InboundUseCaseCode ?? call.CampaignCode);
+    var agent = await db.Agents.FirstAsync(a => a.Id == call.AgentId);
+
+    return Results.Ok(new
+    {
+        call.Id,
+        call.TenantId,
+        call.LeadId,
+        call.AgentId,
+        call.CampaignCode,
+        call.InboundUseCaseCode,
+        call.PhoneTo,
+        call.PhoneFrom,
+        LeadName = lead.Name,
+        AgentName = agent.DisplayName,
+        profile.IntroPitch
+    });
+}).WithOpenApi();
+
+app.MapPost("/v1/calls/{callId:guid}/next", async (Guid callId, [FromBody] NextRequest req, TenantContext tenant, AppDbContext db, CampaignRegistry registry, PromptBuilder pb, ResponseGuard guard, ILlmProvider llm) =>
 {
     var call = await db.Calls.FirstOrDefaultAsync(x => x.TenantId == tenant.TenantId && x.Id == callId);
     if (call is null) return Results.NotFound(new { error = "call not found" });
-
     var lead = await db.Leads.FirstAsync(x => x.TenantId == tenant.TenantId && x.Id == call.LeadId);
     var agent = await db.Agents.FirstAsync(x => x.TenantId == tenant.TenantId && x.Id == call.AgentId);
+    var profile = registry.Get(call.InboundUseCaseCode ?? call.CampaignCode);
+    var fields = await db.CallFields.Where(x => x.TenantId == tenant.TenantId && x.CallId == call.Id).ToDictionaryAsync(x => x.Key, x => x.Value);
+    if (req.Fields is not null) foreach (var kv in req.Fields) fields[kv.Key] = kv.Value;
 
-    var profile = registry.Get(call.CampaignCode);
+    var turnCount = await db.CallTurns.CountAsync(x => x.CallId == call.Id && x.Role == "user");
+    var turns = pb.BuildTurns(profile, call.Direction.ToString(), agent.DisplayName, lead.Name, fields, req.Transcript ?? "", turnCount == 0);
 
-    // Load existing fields
-    var fields = await db.CallFields.Where(x => x.TenantId == tenant.TenantId && x.CallId == call.Id)
-        .ToDictionaryAsync(x => x.Key, x => x.Value);
-
-    // Merge incoming fields (client can pass current known fields)
-    if (req.Fields is not null)
-        foreach (var kv in req.Fields)
-            fields[kv.Key] = kv.Value;
-
-    var turns = pb.BuildTurns(profile, agent.DisplayName, lead.Name, fields, req.Transcript ?? "");
-
-    // store user turn
-    db.CallTurns.Add(new CallTurn
-    {
-        Id = Guid.NewGuid(),
-        TenantId = tenant.TenantId,
-        CallId = call.Id,
-        Role = "user",
-        Text = req.Transcript ?? ""
-    });
-
+    db.CallTurns.Add(new CallTurn { Id = Guid.NewGuid(), TenantId = tenant.TenantId, CallId = call.Id, Role = "user", Text = req.Transcript ?? "" });
     var raw = await llm.CompleteAsync(turns, CancellationToken.None);
     var action = guard.Enforce(raw, profile);
+    db.CallTurns.Add(new CallTurn { Id = Guid.NewGuid(), TenantId = tenant.TenantId, CallId = call.Id, Role = "assistant", Text = action.Say ?? "" });
 
-    // store assistant turn
-    db.CallTurns.Add(new CallTurn
-    {
-        Id = Guid.NewGuid(),
-        TenantId = tenant.TenantId,
-        CallId = call.Id,
-        Role = "assistant",
-        Text = action.Say ?? ""
-    });
-
-    // upsert fields returned by model
     if (action.Fields is not null)
     {
         foreach (var kv in action.Fields)
         {
             if (string.IsNullOrWhiteSpace(kv.Key) || kv.Value is null) continue;
-            var key = kv.Key.Trim();
-            var val = kv.Value.Trim();
-
-            var existing = await db.CallFields.FirstOrDefaultAsync(x => x.TenantId == tenant.TenantId && x.CallId == call.Id && x.Key == key);
-            if (existing is null)
-            {
-                db.CallFields.Add(new CallField { Id = Guid.NewGuid(), TenantId = tenant.TenantId, CallId = call.Id, Key = key, Value = val });
-            }
-            else
-            {
-                existing.Value = val;
-            }
+            var existing = await db.CallFields.FirstOrDefaultAsync(x => x.TenantId == tenant.TenantId && x.CallId == call.Id && x.Key == kv.Key.Trim());
+            if (existing is null) db.CallFields.Add(new CallField { Id = Guid.NewGuid(), TenantId = tenant.TenantId, CallId = call.Id, Key = kv.Key.Trim(), Value = kv.Value.Trim() });
+            else existing.Value = kv.Value.Trim();
         }
     }
 
-    // Auto-status updates based on intent
     var intent = (action.Intent ?? "").ToLowerInvariant();
     if (intent == "dncl")
     {
         call.Status = CallStatus.Dnc;
         lead.Status = CallStatus.Dnc;
         call.EndedAt = DateTimeOffset.UtcNow;
+        if (!await db.DoNotCalls.AnyAsync(x => x.TenantId == tenant.TenantId && x.Phone == lead.Phone))
+            db.DoNotCalls.Add(new DoNotCall { Id = Guid.NewGuid(), TenantId = tenant.TenantId, Phone = lead.Phone, Reason = "Requested during call" });
     }
-    else if (intent == "set_callback")
-    {
-        call.Status = CallStatus.CallbackScheduled;
-        lead.Status = CallStatus.CallbackScheduled;
-    }
-    else if (intent == "transfer")
-    {
-        call.Status = CallStatus.Transferred;
-        lead.Status = CallStatus.Transferred;
-    }
+    else if (intent == "set_callback") { call.Status = CallStatus.CallbackScheduled; lead.Status = CallStatus.CallbackScheduled; }
+    else if (intent == "transfer") { call.Status = CallStatus.Transferred; lead.Status = CallStatus.Transferred; }
 
     await db.SaveChangesAsync();
     return Results.Ok(action);
 }).WithOpenApi();
 
-// Manual status update (Not Interested etc.)
-app.MapPost("/v1/calls/{callId:guid}/status", async (
-    Guid callId,
-    [FromBody] UpdateStatusRequest req,
-    TenantContext tenant,
-    AppDbContext db) =>
+app.MapPost("/v1/calls/{callId:guid}/status", async (Guid callId, [FromBody] UpdateStatusRequest req, TenantContext tenant, AppDbContext db) =>
 {
     var call = await db.Calls.FirstOrDefaultAsync(x => x.TenantId == tenant.TenantId && x.Id == callId);
     if (call is null) return Results.NotFound(new { error = "call not found" });
-
     call.Status = req.Status;
     call.Notes = req.Notes;
     if (req.EndCall) call.EndedAt = DateTimeOffset.UtcNow;
-
     var lead = await db.Leads.FirstAsync(x => x.TenantId == tenant.TenantId && x.Id == call.LeadId);
     lead.Status = req.Status;
-
     await db.SaveChangesAsync();
     return Results.Ok(call);
 }).WithOpenApi();
 
 app.MapGet("/v1/calls", async (TenantContext tenant, AppDbContext db) =>
 {
-    var list = await db.Calls.Where(x => x.TenantId == tenant.TenantId)
-        .OrderByDescending(x => x.StartedAt).ToListAsync();
-    return Results.Ok(list);
+    return Results.Ok(await db.Calls.Where(x => x.TenantId == tenant.TenantId).OrderByDescending(x => x.StartedAt).ToListAsync());
 }).WithOpenApi();
 
-// Existing utility endpoints from previous Swagger host
+// ========== DNC ==========
+app.MapPost("/v1/dnc", async ([FromBody] AddDncRequest req, TenantContext tenant, AppDbContext db) =>
+{
+    var existing = await db.DoNotCalls.FirstOrDefaultAsync(x => x.TenantId == tenant.TenantId && x.Phone == req.Phone);
+    if (existing is not null) return Results.Ok(existing);
+    var dnc = new DoNotCall { Id = Guid.NewGuid(), TenantId = tenant.TenantId, Phone = req.Phone ?? "", Reason = req.Reason };
+    db.DoNotCalls.Add(dnc);
+    await db.SaveChangesAsync();
+    return Results.Ok(dnc);
+}).WithOpenApi();
+
+app.MapGet("/v1/dnc", async (TenantContext tenant, AppDbContext db) =>
+{
+    return Results.Ok(await db.DoNotCalls.Where(x => x.TenantId == tenant.TenantId).OrderByDescending(x => x.CreatedAt).ToListAsync());
+}).WithOpenApi();
+
 app.MapPost("/v1/chat", async ([FromBody] ChatRequest req, ILlmProvider llm) =>
 {
     var turns = new List<ChatTurn>();
-    if (!string.IsNullOrWhiteSpace(req.System))
-        turns.Add(new ChatTurn(ChatRole.System, req.System!));
-
+    if (!string.IsNullOrWhiteSpace(req.System)) turns.Add(new ChatTurn(ChatRole.System, req.System!));
     foreach (var m in req.Messages ?? Array.Empty<ChatMessage>())
     {
-        var role = (m.Role ?? "user").ToLowerInvariant() switch
-        {
-            "system" => ChatRole.System,
-            "assistant" => ChatRole.Assistant,
-            _ => ChatRole.User
-        };
+        var role = (m.Role ?? "user").ToLowerInvariant() switch { "system" => ChatRole.System, "assistant" => ChatRole.Assistant, _ => ChatRole.User };
         turns.Add(new ChatTurn(role, m.Content ?? ""));
     }
-
-    var reply = await llm.CompleteAsync(turns, CancellationToken.None);
-    return Results.Ok(new { reply });
+    return Results.Ok(new { reply = await llm.CompleteAsync(turns, CancellationToken.None) });
 }).WithOpenApi();
 
 app.MapPost("/v1/tts", async ([FromBody] TtsRequest req, ITtsProvider tts, CancellationToken ct) =>
 {
-    if (string.IsNullOrWhiteSpace(req.Text))
-        return Results.BadRequest(new { error = "text is required" });
-
+    if (string.IsNullOrWhiteSpace(req.Text)) return Results.BadRequest(new { error = "text is required" });
     using var ms = new MemoryStream();
-    var cap = req.MaxBytes ?? 120_000;
     await foreach (var frame in tts.SynthesizeMuLawAsync(req.Text!, ct))
     {
         await ms.WriteAsync(frame.Data, ct);
-        if (ms.Length >= cap) break;
+        if (ms.Length >= (req.MaxBytes ?? 120_000)) break;
     }
-
     return Results.File(ms.ToArray(), "application/octet-stream", "tts.ulaw");
 }).WithOpenApi();
 
 app.MapPost("/v1/stt", async ([FromForm] SttFormRequest req, DeepgramPrerecordedStt stt, CancellationToken ct) =>
 {
-    if (req.File is null || req.File.Length == 0)
-        return Results.BadRequest(new { error = "file is required" });
-
-    var q = string.IsNullOrWhiteSpace(req.Query)
-        ? "model=nova-2&smart_format=true&punctuate=true"
-        : req.Query!;
-
+    if (req.File is null || req.File.Length == 0) return Results.BadRequest(new { error = "file is required" });
     await using var stream = req.File.OpenReadStream();
-    var json = await stt.TranscribeAsync(stream, req.File.ContentType ?? "application/octet-stream", q, ct);
-
-    if (string.IsNullOrWhiteSpace(json))
-        return Results.Problem("Deepgram STT failed. Check API key and logs.");
-
+    var json = await stt.TranscribeAsync(stream, req.File.ContentType ?? "application/octet-stream", req.Query ?? "model=nova-2&smart_format=true&punctuate=true", ct);
+    if (string.IsNullOrWhiteSpace(json)) return Results.Problem("Deepgram STT failed.");
     return Results.Text(json, "application/json");
 }).DisableAntiforgery().WithOpenApi();
 
 app.Run();
 
-// DTOs
 public sealed record CreateTenantRequest(string? Name);
 public sealed record CreateAgentRequest(string? DisplayName, string? DefaultCampaignCode);
 public sealed record CreateLeadRequest(string? CampaignCode, string? Name, string? Phone, string? State);
-public sealed record StartCallRequest(Guid LeadId, Guid AgentId, string? CampaignCode);
+public sealed record StartCallRequest(Guid LeadId, Guid AgentId, CallDirection? Direction, string? CampaignCode, string? InboundUseCaseCode, string? PhoneFrom, string? PhoneTo, string? StartReason);
 public sealed record NextRequest(string? Transcript, Dictionary<string, string>? Fields);
+public sealed record AddDncRequest(string? Phone, string? Reason);
 public sealed record UpdateStatusRequest(CallStatus Status, string? Notes, bool EndCall = true);
-
 public sealed record ChatRequest(string? System, ChatMessage[]? Messages);
 public sealed record ChatMessage(string? Role, string? Content);
 public sealed record TtsRequest(string? Text, int? MaxBytes);
-
-public sealed class SttFormRequest
-{
-    [FromForm(Name = "file")]
-    public IFormFile? File { get; set; }
-
-    [FromForm(Name = "query")]
-    public string? Query { get; set; }
-}
-
-public sealed record TtsMp3Request(string Text, string? Voice);
+public sealed class SttFormRequest { [FromForm(Name = "file")] public IFormFile? File { get; set; } [FromForm(Name = "query")] public string? Query { get; set; } }

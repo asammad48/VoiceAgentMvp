@@ -8,4 +8,5 @@ public sealed class CampaignProfile
     public List<string> BannedPhrases { get; set; } = new();
     public string SystemAddon { get; set; } = "";
     public List<string> Script { get; set; } = new();
+    public string? IntroPitch { get; set; }
 }

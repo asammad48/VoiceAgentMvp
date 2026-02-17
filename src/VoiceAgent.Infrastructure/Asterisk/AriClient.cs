@@ -30,20 +30,12 @@ public sealed class AriClient : IAsyncDisposable
     public async Task ConnectEventsAsync(string appName, CancellationToken ct)
     {
         _ws = new ClientWebSocket();
-
         var wsScheme = _baseUri.Scheme.Equals("https", StringComparison.OrdinalIgnoreCase) ? "wss" : "ws";
-
-        var wsUri = new Uri(
-            $"{wsScheme}://{_baseUri.Host}:{_baseUri.Port}/ari/events" +
-            $"?api_key={Uri.EscapeDataString(_user)}:{Uri.EscapeDataString(_pass)}" +
-            $"&app={Uri.EscapeDataString(appName)}"
-        );
-
+        var wsUri = new Uri($"{wsScheme}://{_baseUri.Host}:{_baseUri.Port}/ari/events?api_key={Uri.EscapeDataString(_user)}:{Uri.EscapeDataString(_pass)}&app={Uri.EscapeDataString(appName)}");
         _log.LogInformation("Connecting ARI WS: {Uri}", wsUri);
         await _ws.ConnectAsync(wsUri, ct);
         _log.LogInformation("ARI WS connected.");
     }
-
 
     public async IAsyncEnumerable<AriEvent> ReadEventsAsync([System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
     {
@@ -63,7 +55,6 @@ public sealed class AriClient : IAsyncDisposable
             AriEvent? ev = null;
             try { ev = JsonSerializer.Deserialize<AriEvent>(sb.ToString()); }
             catch (Exception ex) { _log.LogWarning(ex, "Bad ARI event JSON"); }
-
             if (ev is not null) yield return ev;
         }
     }
@@ -73,6 +64,9 @@ public sealed class AriClient : IAsyncDisposable
     public Task AnswerAsync(string channelId, CancellationToken ct)
         => _http.PostAsync(Url($"/ari/channels/{Uri.EscapeDataString(channelId)}/answer"), null, ct);
 
+    public Task HangupAsync(string channelId, CancellationToken ct)
+        => _http.DeleteAsync(Url($"/ari/channels/{Uri.EscapeDataString(channelId)}"), ct);
+
     public async Task<string> CreateBridgeAsync(string type, CancellationToken ct)
     {
         var resp = await _http.PostAsync(Url($"/ari/bridges?type={Uri.EscapeDataString(type)}"), null, ct);
@@ -81,36 +75,21 @@ public sealed class AriClient : IAsyncDisposable
         return doc.RootElement.GetProperty("id").GetString() ?? throw new Exception("Bridge id missing");
     }
 
+    public Task DeleteBridgeAsync(string bridgeId, CancellationToken ct)
+        => _http.DeleteAsync(Url($"/ari/bridges/{Uri.EscapeDataString(bridgeId)}"), ct);
+
     public Task AddChannelToBridgeAsync(string bridgeId, string channelId, CancellationToken ct)
         => _http.PostAsync(Url($"/ari/bridges/{Uri.EscapeDataString(bridgeId)}/addChannel?channel={Uri.EscapeDataString(channelId)}"), null, ct);
 
     public async Task<string> CreateExternalMediaAsync(string appName, string externalHost, string format, CancellationToken ct)
     {
-        var payload = JsonSerializer.Serialize(new Dictionary<string, object?>
-        {
-            ["app"] = appName,
-            ["external_host"] = externalHost,
-            ["format"] = format,
-            ["encapsulation"] = "rtp",
-            ["transport"] = "udp",
-            ["direction"] = "both",
-            ["connection_type"] = "client"
-        });
-
-        var resp = await _http.PostAsync(
-            Url("/ari/channels/externalMedia"),
-            new StringContent(payload, Encoding.UTF8, "application/json"),
-            ct);
-
+        var payload = JsonSerializer.Serialize(new { app = appName, external_host = externalHost, format = format, encapsulation = "rtp", transport = "udp", direction = "both", connection_type = "client" });
+        var resp = await _http.PostAsync(Url("/ari/channels/externalMedia"), new StringContent(payload, Encoding.UTF8, "application/json"), ct);
         var body = await resp.Content.ReadAsStringAsync(ct);
-
-        if (!resp.IsSuccessStatusCode)
-            throw new Exception($"ARI externalMedia failed {(int)resp.StatusCode}: {body}");
-
+        if (!resp.IsSuccessStatusCode) throw new Exception($"ARI externalMedia failed {(int)resp.StatusCode}: {body}");
         using var doc = JsonDocument.Parse(body);
         return doc.RootElement.GetProperty("id").GetString() ?? throw new Exception("ExternalMedia id missing");
     }
-
 
     public async Task<string> OriginateAsync(string endpoint, string appName, string? callerId, CancellationToken ct)
     {
@@ -124,14 +103,8 @@ public sealed class AriClient : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        try
-        {
-            if (_ws is not null && _ws.State == WebSocketState.Open)
-                await _ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", CancellationToken.None);
-        }
-        catch(Exception ex) {
-           Console.WriteLine(ex);
-        }
+        try { if (_ws is not null && _ws.State == WebSocketState.Open) await _ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", CancellationToken.None); }
+        catch(Exception ex) { Console.WriteLine(ex); }
         _ws?.Dispose();
     }
 }

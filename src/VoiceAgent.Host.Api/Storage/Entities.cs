@@ -12,7 +12,19 @@ public enum CallStatus
     Dnc = 7,
     Transferred = 8,
     Completed = 9,
-    Failed = 10
+    Failed = 10,
+    Busy = 11,
+    FailedNetwork = 12,
+    FailedProvider = 13,
+    AgentHungUp = 14,
+    LeadHungUp = 15,
+    DncBlocked = 16
+}
+
+public enum CallDirection
+{
+    Inbound = 0,
+    Outbound = 1
 }
 
 public sealed class Tenant
@@ -49,11 +61,24 @@ public sealed class Call
     public Guid TenantId { get; set; }
     public Guid LeadId { get; set; }
     public Guid AgentId { get; set; }
+    public CallDirection Direction { get; set; } = CallDirection.Outbound;
     public string CampaignCode { get; set; } = "FE";
+    public string? InboundUseCaseCode { get; set; }
+    public string? PhoneFrom { get; set; }
+    public string? PhoneTo { get; set; }
+    public string? AsteriskChannelId { get; set; }
+    public string? StartReason { get; set; } // console, vicidial, inbound, etc.
+
     public CallStatus Status { get; set; } = CallStatus.Started;
     public string? Notes { get; set; }
     public DateTimeOffset StartedAt { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset? EndedAt { get; set; }
+
+    // Vicidial compatibility
+    public string? ExternalSystem { get; set; }
+    public string? ExternalCampaignId { get; set; }
+    public string? ExternalLeadId { get; set; }
+    public string? DispositionCode { get; set; }
 }
 
 public sealed class CallTurn
@@ -73,4 +98,13 @@ public sealed class CallField
     public Guid CallId { get; set; }
     public string Key { get; set; } = "";
     public string Value { get; set; } = "";
+}
+
+public sealed class DoNotCall
+{
+    public Guid Id { get; set; }
+    public Guid TenantId { get; set; }
+    public string Phone { get; set; } = "";
+    public string? Reason { get; set; }
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
 }

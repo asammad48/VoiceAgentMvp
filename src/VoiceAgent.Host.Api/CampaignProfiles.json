@@ -1,101 +1,65 @@
 {
   "FE": {
     "name": "Final Expense",
-    "allowedIntents": [
-      "greet",
-      "consent",
-      "qualify",
-      "handle_objection",
-      "set_callback",
-      "transfer",
-      "dncl",
-      "end"
-    ],
-    "requiredFields": [
-      "state",
-      "age_range",
-      "has_coverage",
-      "callback_time"
-    ],
-    "bannedPhrases": [
-      "guaranteed",
-      "free",
-      "government",
-      "medicare office",
-      "approved for sure",
-      "$"
-    ],
-    "systemAddon": "Campaign = Final Expense (FE). Goal = qualify and schedule a licensed agent callback. Do NOT quote prices or guarantee approval. Do NOT pressure. If asked for price/benefits, offer licensed callback.",
-    "script": [
-      "Open: Hi, is this {lead_name}? My name is {agent_name}. I'm calling about your final expense coverage request. Is now a bad time?",
-      "Qualify: What state are you in? What age range fits you best: 50\u201364, 65\u201374, or 75+? Do you already have any coverage in place?",
-      "Close: Thanks. I'll have a licensed agent call you back to review options. What's a good callback time today or tomorrow?"
-    ]
+    "introPitch": "Hi, is this {lead_name}? My name is {agent_name}. I'm calling about your final expense coverage request. Is now a bad time?",
+    "allowedIntents": [ "greet", "consent", "qualify", "handle_objection", "set_callback", "transfer", "dncl", "end" ],
+    "requiredFields": [ "state", "age_range", "has_coverage", "callback_time" ],
+    "bannedPhrases": [ "guaranteed", "free", "government", "medicare office", "approved for sure", "$" ],
+    "systemAddon": "Campaign = Final Expense (FE). Goal = qualify and schedule a licensed agent callback.",
+    "script": [ "Hi, is this {lead_name}? My name is {agent_name}. I'm calling about your final expense coverage request. Is now a bad time?" ]
   },
   "ACA": {
     "name": "ACA Marketplace",
-    "allowedIntents": [
-      "greet",
-      "consent",
-      "qualify",
-      "handle_objection",
-      "set_callback",
-      "transfer",
-      "dncl",
-      "end"
-    ],
-    "requiredFields": [
-      "state",
-      "household_size",
-      "income_range",
-      "has_coverage",
-      "callback_time"
-    ],
-    "bannedPhrases": [
-      "guaranteed",
-      "free plan",
-      "government program",
-      "you qualify for",
-      "$"
-    ],
-    "systemAddon": "Campaign = ACA health coverage assistance. Goal = eligibility pre-check and schedule licensed specialist. Do NOT promise subsidies or coverage. Do NOT give medical advice.",
-    "script": [
-      "Open: Hi {lead_name}, this is {agent_name}. I'm calling about health coverage options through the marketplace. Is now a bad time?",
-      "Qualify: What state are you in? How many people are in your household? Do you currently have coverage? What income range fits best?",
-      "Close: Thanks. I'll schedule a licensed specialist to call you back. What time works today or tomorrow?"
-    ]
+    "introPitch": "Hi {lead_name}, this is {agent_name}. I'm calling about health coverage options. Is now a bad time?",
+    "allowedIntents": [ "greet", "consent", "qualify", "handle_objection", "set_callback", "transfer", "dncl", "end" ],
+    "requiredFields": [ "state", "household_size", "income_range", "has_coverage", "callback_time" ],
+    "bannedPhrases": [ "guaranteed", "free plan", "government program", "$" ],
+    "systemAddon": "Campaign = ACA health coverage assistance. Goal = eligibility pre-check and schedule licensed specialist.",
+    "script": [ "Hi {lead_name}, this is {agent_name}. I'm calling about health coverage options through the marketplace. Is now a bad time?" ]
   },
   "MEDICARE": {
     "name": "Medicare Review",
-    "allowedIntents": [
-      "greet",
-      "consent",
-      "qualify",
-      "handle_objection",
-      "set_callback",
-      "transfer",
-      "dncl",
-      "end"
-    ],
-    "requiredFields": [
-      "state",
-      "has_medicare",
-      "parts_ab",
-      "callback_time"
-    ],
-    "bannedPhrases": [
-      "medicare",
-      "from medicare",
-      "government",
-      "official",
-      "guaranteed",
-      "$"
-    ],
-    "systemAddon": "Campaign = Medicare plan review scheduling. Never claim to be Medicare/government. Do NOT recommend specific plans. Only qualify and schedule a licensed Medicare agent callback.",
-    "script": [
-      "Open: Hi {lead_name}, this is {agent_name}. I'm calling about a Medicare plan review request. Is now a bad time?",
-      "Qualify: What state are you in? Are you currently on Medicare Part A and B? (Yes/No/Not sure)",
-      "Close: Thanks. I'll have a licensed Medicare agent call you back for a quick review. What callback time works today or tomorrow?"
-    ]
+    "introPitch": "Hi {lead_name}, this is {agent_name}. I'm calling about a Medicare plan review request. Is now a bad time?",
+    "allowedIntents": [ "greet", "consent", "qualify", "handle_objection", "set_callback", "transfer", "dncl", "end" ],
+    "requiredFields": [ "state", "has_medicare", "parts_ab", "callback_time" ],
+    "bannedPhrases": [ "medicare", "from medicare", "government", "$" ],
+    "systemAddon": "Campaign = Medicare plan review scheduling. Never claim to be Medicare/government.",
+    "script": [ "Hi {lead_name}, this is {agent_name}. I'm calling about a Medicare plan review request. Is now a bad time?" ]
+  },
+  "SOLAR": {
+    "name": "Solar Energy",
+    "introPitch": "Hi {lead_name}, this is {agent_name}. I'm calling about your interest in reducing your electric bill with solar. Is now a bad time?",
+    "allowedIntents": [ "greet", "consent", "qualify", "handle_objection", "set_callback", "transfer", "dncl", "end" ],
+    "requiredFields": [ "state", "monthly_bill", "home_owner", "callback_time" ],
+    "bannedPhrases": [ "free panels", "no cost", "government program", "$" ],
+    "systemAddon": "Campaign = Solar Energy. Goal = qualify home ownership and bill amount.",
+    "script": [ "Hi {lead_name}, this is {agent_name}. I'm calling about your interest in solar. Is now a bad time?" ]
+  },
+  "AUTOCARE": {
+    "name": "AutoCare Insurance",
+    "introPitch": "Hi {lead_name}, this is {agent_name}. I'm calling to see if we can help you save on your auto insurance. Is now a bad time?",
+    "allowedIntents": [ "greet", "consent", "qualify", "handle_objection", "set_callback", "transfer", "dncl", "end" ],
+    "requiredFields": [ "state", "car_year_make", "has_insurance", "callback_time" ],
+    "bannedPhrases": [ "guaranteed lowest", "legal advice", "$" ],
+    "systemAddon": "Campaign = AutoCare Insurance. Goal = qualify and schedule a licensed agent.",
+    "script": [ "Hi {lead_name}, this is {agent_name}. I'm calling about your auto insurance. Is now a bad time?" ]
+  },
+  "DOCTOR_APPT": {
+    "name": "Doctor Appointment",
+    "introPitch": "Thank you for calling our clinic. How can I help you today?",
+    "allowedIntents": [ "greet", "book_appointment", "cancel_appointment", "ask_question", "transfer", "end" ],
+    "requiredFields": [ "patient_name", "preferred_date", "preferred_time", "clinic_location", "callback_number" ],
+    "bannedPhrases": [ "medical advice", "cure", "emergency", "$" ],
+    "systemAddon": "Inbound = Doctor Appointment. Goal = capture patient info and preferred time.",
+    "script": [ "Hello, thank you for calling. Are you looking to schedule an appointment?" ]
+  },
+  "CAB_BOOKING": {
+    "name": "Cab Booking Service",
+    "introPitch": "Hello, this is the Cab Booking Service. Where would you like to go?",
+    "allowedIntents": [ "greet", "book_cab", "check_status", "cancel_cab", "end" ],
+    "requiredFields": [ "pickup_location", "dropoff_location", "pickup_time", "passengers", "callback_number" ],
+    "bannedPhrases": [ "guaranteed time", "price match", "$" ],
+    "systemAddon": "Inbound = Cab Booking. Goal = capture pickup/dropoff and time.",
+    "script": [ "Hi! Where are we picking you up from and where are you headed?" ]
   }
 }
