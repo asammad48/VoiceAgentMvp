@@ -30,7 +30,7 @@ public sealed class PromptBuilder
                 !line.Contains("Hi ", StringComparison.OrdinalIgnoreCase) &&
                 !line.Contains("Hi,", StringComparison.OrdinalIgnoreCase) &&
                 !line.Contains("Hello", StringComparison.OrdinalIgnoreCase) &&
-                !line.Contains("Is now a bad time", StringComparison.OrdinalIgnoreCase)).ToArray();
+                !line.Contains("Is now a bad time", StringComparison.OrdinalIgnoreCase)).ToList();
         }
 
         var sys = $@"
@@ -53,7 +53,7 @@ CURRENT STAGE: {nextStep.NextStage}
 {(nextStep.RequiredFieldKey != null ? $"GOAL: Collect the field '{nextStep.RequiredFieldKey}'." : "")}
 NEXT_QUESTION_KEY: {nextStep.NextQuestionKey}
 
-{(scriptLines.Length > 0 ? "SCRIPT (follow this structure):\n- " + string.Join("\n- ", scriptLines) : "")}
+{(scriptLines.Count > 0 ? "SCRIPT (follow this structure):\n- " + string.Join("\n- ", scriptLines) : "")}
 
 AGENT NAME: {agentName}
 LEAD NAME: {leadName}
