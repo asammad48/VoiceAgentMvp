@@ -10,7 +10,12 @@ public sealed class CampaignRegistry
     {
         var path = Path.Combine(env.ContentRootPath, "CampaignProfiles.json");
         var json = File.ReadAllText(path);
-        var dict = JsonSerializer.Deserialize<Dictionary<string, CampaignProfile>>(json) ?? new();
+        var options = new JsonSerializerOptions
+        {
+            PropertyNameCaseInsensitive = true
+        };
+        var dict = JsonSerializer.Deserialize<Dictionary<string, CampaignProfile>>(json, options)
+                   ?? new();
         _profiles = dict.ToDictionary(k => k.Key.ToUpperInvariant(), v => v.Value);
     }
 

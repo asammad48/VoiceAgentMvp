@@ -50,16 +50,18 @@ public sealed class ConversationOrchestrator
 
             var pumpTask = PumpAudioToSttAsync(token);
 
+
             // Initial intro pitch
             if (!string.IsNullOrWhiteSpace(call.IntroPitch))
             {
                 var intro = call.IntroPitch.Replace("{lead_name}", call.LeadName).Replace("{agent_name}", call.AgentName);
+                Console.WriteLine("Intro Palyed:- "+call.IntroPitch);
                 await PlayIntroAsync(intro, token);
             }
 
             var loopTask = HandleTranscriptsAsync(call, token);
 
-            await Task.WhenAny(pumpTask, loopTask);
+            await Task.WhenAll(pumpTask, loopTask);
         }
         catch (OperationCanceledException) when (callTimeoutCts.IsCancellationRequested)
         {
@@ -145,6 +147,7 @@ public sealed class ConversationOrchestrator
         {
             await foreach (var upd in _stt.GetUpdatesAsync(ct))
             {
+                Console.WriteLine("Foreach loop");
                 if (!string.IsNullOrWhiteSpace(upd.Text))
                 {
                     lastActivityAt = DateTimeOffset.UtcNow;
@@ -155,7 +158,7 @@ public sealed class ConversationOrchestrator
                         speakCts.Cancel();
                     }
                 }
-
+                Console.WriteLine("IsFinal And UpdText:- "+ upd.Text);
                 if (upd.IsFinal && !string.IsNullOrWhiteSpace(upd.Text))
                 {
                     isProcessing = true;
@@ -171,7 +174,7 @@ public sealed class ConversationOrchestrator
                         {
                             foreach (var kv in action.Fields) fields[kv.Key] = kv.Value;
                         }
-
+                        Console.WriteLine("Action Say:- " + action.Say);
                         if (!string.IsNullOrWhiteSpace(action.Say))
                         {
                             speakCts?.Dispose();

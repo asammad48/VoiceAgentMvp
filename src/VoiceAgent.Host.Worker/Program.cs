@@ -138,7 +138,7 @@ public sealed class Worker : BackgroundService
                 _log.LogError(ex, "Error in worker polling loop");
             }
 
-            await Task.Delay(2000, stoppingToken);
+            await Task.Delay(200000, stoppingToken);
         }
     }
 }

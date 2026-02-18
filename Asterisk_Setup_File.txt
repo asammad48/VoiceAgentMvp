@@ -1,0 +1,237 @@
+﻿# ✅ 1️⃣ Clean EF Core Migration Commands
+
+From your project root:
+
+```bash
+# Add migration
+dotnet ef migrations add InitialCreate \
+--project src/VoiceAgent.Host.Api \
+--startup-project src/VoiceAgent.Host.Api \
+--output-dir Infrastructure/Persistence/Migrations
+
+# Update database
+dotnet ef database update \
+--project src/VoiceAgent.Host.Api \
+--startup-project src/VoiceAgent.Host.Api
+```
+
+### 🔎 Optional: Remove Last Migration (if needed)
+
+```bash
+dotnet ef migrations remove \
+--project src/VoiceAgent.Host.Api \
+--startup-project src/VoiceAgent.Host.Api
+```
+
+---
+
+# ✅ 2️⃣ Clean Asterisk Restart Commands (Proper Way)
+
+⚠️ You were running from `/mnt/c/WINDOWS/system32` — don’t do that.
+
+Move to Linux home:
+
+```bash
+cd ~
+```
+
+---
+
+### 🔴 Stop Asterisk Properly
+
+```bash
+sudo systemctl stop asterisk
+```
+
+If systemctl not available:
+
+```bash
+sudo service asterisk stop
+```
+
+---
+
+### 🟢 Start Asterisk
+
+```bash
+sudo systemctl start asterisk
+```
+
+OR
+
+```bash
+sudo service asterisk start
+```
+
+---
+
+### 🔍 Check Status
+
+```bash
+sudo systemctl status asterisk
+```
+
+---
+
+### 🖥 Enter Asterisk Console
+
+```bash
+sudo asterisk -rvvv
+```
+
+If it fails, force start in foreground:
+
+```bash
+sudo asterisk -cvvv
+```
+
+---
+
+# ✅ 3️⃣ Fix Your Current Error
+
+You got:
+
+```
+Unable to connect to remote asterisk
+(does /var/run/asterisk/asterisk.ctl exist?)
+```
+
+That means:
+
+* Asterisk service is NOT running
+* OR wrong permissions
+
+Check:
+
+```bash
+ps aux | grep asterisk
+```
+
+If nothing shows → it's not running.
+
+Start manually:
+
+```bash
+sudo asterisk -cvvv
+```
+
+Then open new terminal and:
+
+```bash
+sudo asterisk -rvvv
+```
+
+---
+
+# ✅ 4️⃣ Increase File Descriptors (Production Safe)
+
+Temporary:
+
+```bash
+ulimit -n 1048576
+```
+
+Permanent:
+
+Edit:
+
+```bash
+sudo nano /etc/security/limits.conf
+```
+
+Add:
+
+```
+asterisk soft nofile 1048576
+asterisk hard nofile 1048576
+```
+
+Enable PAM limits:
+
+```bash
+sudo nano /etc/pam.d/common-session
+```
+
+Add if missing:
+
+```
+session required pam_limits.so
+```
+
+Reboot after changes.
+
+---
+
+# ✅ 5️⃣ Verify ARI Connection (Very Important)
+
+Test ARI:
+
+```bash
+curl -u aiuser:strongpassword123 \
+http://172.21.136.78:8088/ari/api-docs/resources.json
+```
+
+If working → you’ll see JSON output.
+
+---
+
+# ✅ 6️⃣ Verify ARI is Enabled in Asterisk
+
+Inside console:
+
+```bash
+http show status
+ari show status
+```
+
+You should see:
+
+* Enabled: Yes
+* Bound to 0.0.0.0:8088
+
+If not, check:
+
+`/etc/asterisk/http.conf`
+
+```
+enabled = yes
+bindaddr = 0.0.0.0
+bindport = 8088
+```
+
+`/etc/asterisk/ari.conf`
+
+```
+enabled = yes
+pretty = yes
+
+[aiuser]
+type = user
+read_only = no
+password = strongpassword123
+```
+
+Reload:
+
+```bash
+sudo asterisk -rx "module reload res_http_websocket.so"
+sudo asterisk -rx "module reload res_ari.so"
+```
+
+---
+
+# 🎯 Clean Production Flow (Final)
+
+```bash
+sudo systemctl restart asterisk
+sudo asterisk -rx "core reload"
+sudo asterisk -rvvv
+```
+
+Test ARI:
+
+```bash
+curl -u aiuser:strongpassword123 http://IP:8088/ari/api-docs/resources.json
+```
+
+---
