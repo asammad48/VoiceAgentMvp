@@ -50,6 +50,8 @@ builder.Services.AddSingleton<TenantContext>();
 builder.Services.AddSingleton<CampaignRegistry>();
 builder.Services.AddSingleton<PromptBuilder>();
 builder.Services.AddSingleton<ResponseGuard>();
+builder.Services.AddSingleton<IConversationStateStore, DbConversationStateStore>();
+builder.Services.AddSingleton<INextStepPlanner, NextStepPlanner>();
 
 builder.Services.AddDbContext<AppDbContext>(opt =>
 {
@@ -233,7 +235,7 @@ app.MapPost("/v1/calls/claim", async (TenantContext tenant, AppDbContext db, Cam
     });
 }).WithOpenApi();
 
-app.MapPost("/v1/calls/{callId:guid}/next", async (Guid callId, [FromBody] NextRequest req, TenantContext tenant, AppDbContext db, CampaignRegistry registry, PromptBuilder pb, ResponseGuard guard, ILlmProvider llm) =>
+app.MapPost("/v1/calls/{callId:guid}/next", async (Guid callId, [FromBody] NextRequest req, TenantContext tenant, AppDbContext db, CampaignRegistry registry, PromptBuilder pb, ResponseGuard guard, ILlmProvider llm, IConversationStateStore stateStore, INextStepPlanner planner) =>
 {
     var call = await db.Calls.FirstOrDefaultAsync(x => x.TenantId == tenant.TenantId && x.Id == callId);
     if (call is null) return Results.NotFound(new { error = "call not found" });
@@ -243,13 +245,22 @@ app.MapPost("/v1/calls/{callId:guid}/next", async (Guid callId, [FromBody] NextR
     var fields = await db.CallFields.Where(x => x.TenantId == tenant.TenantId && x.CallId == call.Id).ToDictionaryAsync(x => x.Key, x => x.Value);
     if (req.Fields is not null) foreach (var kv in req.Fields) fields[kv.Key] = kv.Value;
 
+    var currentStage = stateStore.GetCurrentStage(call);
+    var nextStep = planner.PlanNext(call.InboundUseCaseCode ?? call.CampaignCode, currentStage, fields);
+
     var turnCount = await db.CallTurns.CountAsync(x => x.CallId == call.Id && x.Role == "user");
-    var turns = pb.BuildTurns(profile, call.Direction.ToString(), agent.DisplayName, lead.Name, fields, req.Transcript ?? "", turnCount == 0);
+    var turns = pb.BuildTurns(profile, call.Direction.ToString(), agent.DisplayName, lead.Name, fields, req.Transcript ?? "", turnCount == 0, nextStep);
 
     db.CallTurns.Add(new CallTurn { Id = Guid.NewGuid(), TenantId = tenant.TenantId, CallId = call.Id, Role = "user", Text = req.Transcript ?? "" });
     var raw = await llm.CompleteAsync(turns, CancellationToken.None);
     var action = guard.Enforce(raw, profile);
     db.CallTurns.Add(new CallTurn { Id = Guid.NewGuid(), TenantId = tenant.TenantId, CallId = call.Id, Role = "assistant", Text = action.Say ?? "" });
+
+    // Update stage if it changed
+    if (nextStep.NextStage != currentStage)
+    {
+        stateStore.SetCurrentStage(call, nextStep.NextStage);
+    }
 
     if (action.Fields is not null)
     {

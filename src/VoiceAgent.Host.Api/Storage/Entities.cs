@@ -68,6 +68,7 @@ public sealed class Call
     public string? PhoneTo { get; set; }
     public string? AsteriskChannelId { get; set; }
     public string? StartReason { get; set; } // console, vicidial, inbound, etc.
+    public string CurrentStage { get; set; } = "Greeting";
 
     public CallStatus Status { get; set; } = CallStatus.Started;
     public string? Notes { get; set; }
