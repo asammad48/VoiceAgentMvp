@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using VoiceAgent.Domain.Models.Conversation;
@@ -242,13 +243,27 @@ app.MapPost("/v1/calls/{callId:guid}/next", async (Guid callId, [FromBody] NextR
     var lead = await db.Leads.FirstAsync(x => x.TenantId == tenant.TenantId && x.Id == call.LeadId);
     var agent = await db.Agents.FirstAsync(x => x.TenantId == tenant.TenantId && x.Id == call.AgentId);
     var profile = registry.Get(call.InboundUseCaseCode ?? call.CampaignCode);
-    var fields = await db.CallFields.Where(x => x.TenantId == tenant.TenantId && x.CallId == call.Id).ToDictionaryAsync(x => x.Key, x => x.Value);
-    if (req.Fields is not null) foreach (var kv in req.Fields) fields[kv.Key] = kv.Value;
+
+    // Load structured fields
+    var fields = new Dictionary<string, CallFieldValue>(StringComparer.OrdinalIgnoreCase);
+    if (!string.IsNullOrWhiteSpace(call.FieldsJson))
+    {
+        fields = JsonSerializer.Deserialize<Dictionary<string, CallFieldValue>>(call.FieldsJson) ?? fields;
+    }
+
+    // Handle legacy/external fields if any
+    if (req.Fields is not null)
+    {
+        foreach (var kv in req.Fields)
+        {
+            if (!fields.ContainsKey(kv.Key)) fields[kv.Key] = new CallFieldValue { Value = kv.Value, Confirmed = true };
+        }
+    }
 
     var currentStage = stateStore.GetCurrentStage(call);
     var nextStep = planner.PlanNext(call.InboundUseCaseCode ?? call.CampaignCode, currentStage, fields);
 
-    var missingFields = profile.RequiredFields.Where(f => !fields.ContainsKey(f)).ToList();
+    var missingFields = profile.RequiredFields.Where(f => !fields.ContainsKey(f) || fields[f].Value == null).ToList();
     logger.LogInformation("[TURN DEBUG] Call: {CallId}, CurrentStage: {CurrentStage}, MissingFields: {MissingFields}, NextStageGoal: {NextStageGoal}",
         call.Id, currentStage, string.Join(",", missingFields), nextStep.NextStage);
 
@@ -289,14 +304,50 @@ app.MapPost("/v1/calls/{callId:guid}/next", async (Guid callId, [FromBody] NextR
     {
         foreach (var kv in action.Fields)
         {
-            if (string.IsNullOrWhiteSpace(kv.Key) || kv.Value is null) continue;
-            var existing = await db.CallFields.FirstOrDefaultAsync(x => x.TenantId == tenant.TenantId && x.CallId == call.Id && x.Key == kv.Key.Trim());
-            if (existing is null) db.CallFields.Add(new CallField { Id = Guid.NewGuid(), TenantId = tenant.TenantId, CallId = call.Id, Key = kv.Key.Trim(), Value = kv.Value.Trim() });
-            else existing.Value = kv.Value.Trim();
+            var key = kv.Key.Trim();
+            if (string.IsNullOrWhiteSpace(key) || kv.Value is null) continue;
+
+            // Rule: if value != null AND confirmed=true -> NEVER ask again (and don't overwrite with unconfirmed)
+            if (fields.TryGetValue(key, out var existing) && existing.Confirmed && !nextStep.NextStage.Equals(CampaignStages.FinalConfirm))
+            {
+                continue;
+            }
+
+            fields[key] = new CallFieldValue
+            {
+                Value = kv.Value.Trim(),
+                Confirmed = false, // mark confirmed=true only in FinalConfirm or special cases
+                Ts = DateTimeOffset.UtcNow
+            };
         }
     }
 
+    // Handle FinalConfirm logic
     var intent = (action.Intent ?? "").ToLowerInvariant();
+    if (currentStage == CampaignStages.FinalConfirm)
+    {
+        // If LLM says intent is 'end' or similar, it means user confirmed
+        if (intent == "end" || intent == "transfer" || intent == "set_callback")
+        {
+            foreach (var f in profile.RequiredFields)
+            {
+                if (fields.TryGetValue(f, out var val)) val.Confirmed = true;
+            }
+        }
+    }
+
+    // Special case for consent (treat as field)
+    if (fields.TryGetValue("consent", out var consentVal) && consentVal.Value != null)
+    {
+        var valStr = consentVal.Value.ToString()?.ToLowerInvariant();
+        if (valStr == "true" || valStr == "yes" || valStr == "confirmed")
+        {
+            consentVal.Confirmed = true;
+        }
+    }
+
+    call.FieldsJson = JsonSerializer.Serialize(fields);
+
     if (intent == "dncl")
     {
         call.Status = CallStatus.Dnc;

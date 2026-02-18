@@ -2,6 +2,8 @@ namespace VoiceAgent.Host.Api.Campaign;
 
 public static class CampaignStages
 {
+    public const string FinalConfirm = "FinalConfirm";
+
     public static class FE
     {
         public const string Greeting = "Greeting";
@@ -12,7 +14,7 @@ public static class CampaignStages
         public const string SetCallback = "SetCallback";
         public const string End = "End";
 
-        public static readonly string[] Order = { Greeting, Consent, QualifyAge, QualifyState, QualifyCoverage, SetCallback, End };
+        public static readonly string[] Order = { Greeting, Consent, QualifyAge, QualifyState, QualifyCoverage, SetCallback, FinalConfirm, End };
     }
 
     public static class ACA
@@ -26,7 +28,7 @@ public static class CampaignStages
         public const string SetCallback = "SetCallback";
         public const string End = "End";
 
-        public static readonly string[] Order = { Greeting, Consent, QualifyState, QualifyHousehold, QualifyIncomeRange, QualifyCoverage, SetCallback, End };
+        public static readonly string[] Order = { Greeting, Consent, QualifyState, QualifyHousehold, QualifyIncomeRange, QualifyCoverage, SetCallback, FinalConfirm, End };
     }
 
     public static class Medicare
@@ -39,7 +41,7 @@ public static class CampaignStages
         public const string SetCallback = "SetCallback";
         public const string End = "End";
 
-        public static readonly string[] Order = { Greeting, Consent, QualifyState, ConfirmMedicare, PartsABCheck, SetCallback, End };
+        public static readonly string[] Order = { Greeting, Consent, QualifyState, ConfirmMedicare, PartsABCheck, SetCallback, FinalConfirm, End };
     }
 
     public static class Solar
@@ -52,7 +54,7 @@ public static class CampaignStages
         public const string SetCallback = "SetCallback";
         public const string End = "End";
 
-        public static readonly string[] Order = { Greeting, Consent, QualifyState, HomeOwnerCheck, RoofTypeOrUtilityBill, SetCallback, End };
+        public static readonly string[] Order = { Greeting, Consent, QualifyState, HomeOwnerCheck, RoofTypeOrUtilityBill, SetCallback, FinalConfirm, End };
     }
 
     public static class AutoCare
@@ -65,7 +67,7 @@ public static class CampaignStages
         public const string SetCallback = "SetCallback";
         public const string End = "End";
 
-        public static readonly string[] Order = { Greeting, Consent, QualifyState, VehicleInfo, CurrentCoverage, SetCallback, End };
+        public static readonly string[] Order = { Greeting, Consent, QualifyState, VehicleInfo, CurrentCoverage, SetCallback, FinalConfirm, End };
     }
 
     public static class DoctorAppt
@@ -76,10 +78,9 @@ public static class CampaignStages
         public const string CollectPreferredDate = "CollectPreferredDate";
         public const string CollectPreferredTime = "CollectPreferredTime";
         public const string ConfirmCallbackNumber = "ConfirmCallbackNumber";
-        public const string ConfirmSummary = "ConfirmSummary";
         public const string End = "End";
 
-        public static readonly string[] Order = { Greeting, IdentifyNeed, CollectPatientName, CollectPreferredDate, CollectPreferredTime, ConfirmCallbackNumber, ConfirmSummary, End };
+        public static readonly string[] Order = { Greeting, IdentifyNeed, CollectPatientName, CollectPreferredDate, CollectPreferredTime, ConfirmCallbackNumber, FinalConfirm, End };
     }
 
     public static class CabBooking
@@ -91,10 +92,9 @@ public static class CampaignStages
         public const string CollectPickupTime = "CollectPickupTime";
         public const string OptionalPassengers = "OptionalPassengers";
         public const string ConfirmCallbackNumber = "ConfirmCallbackNumber";
-        public const string ConfirmSummary = "ConfirmSummary";
         public const string End = "End";
 
-        public static readonly string[] Order = { Greeting, IdentifyNeed, CollectPickupLocation, CollectDropoffLocation, CollectPickupTime, OptionalPassengers, ConfirmCallbackNumber, ConfirmSummary, End };
+        public static readonly string[] Order = { Greeting, IdentifyNeed, CollectPickupLocation, CollectDropoffLocation, CollectPickupTime, OptionalPassengers, ConfirmCallbackNumber, FinalConfirm, End };
     }
 
     public static string[] GetOrderForCampaign(string campaignCode)

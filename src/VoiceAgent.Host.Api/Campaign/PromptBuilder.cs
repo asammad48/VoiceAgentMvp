@@ -9,13 +9,13 @@ public sealed class PromptBuilder
         string direction,
         string agentName,
         string leadName,
-        IReadOnlyDictionary<string, string> fields,
+        IReadOnlyDictionary<string, Storage.CallFieldValue> fields,
         string lastUserUtterance,
         bool isFirstTurn,
         NextStep nextStep)
     {
         var isGreetingStage = nextStep.NextStage == "Greeting";
-        var consentConfirmed = fields.TryGetValue("consent", out var c) && (c.Equals("true", StringComparison.OrdinalIgnoreCase) || c.Equals("yes", StringComparison.OrdinalIgnoreCase));
+        var consentConfirmed = fields.TryGetValue("consent", out var c) && (c.Value?.ToString()?.Equals("true", StringComparison.OrdinalIgnoreCase) == true || c.Value?.ToString()?.Equals("yes", StringComparison.OrdinalIgnoreCase) == true);
         var intro = (profile.IntroPitch ?? "").Replace("{lead_name}", leadName).Replace("{agent_name}", agentName);
 
         var fieldsToExtract = new HashSet<string>(profile.RequiredFields);
@@ -50,6 +50,7 @@ Return JSON ONLY with this schema:
 {profile.SystemAddon}
 
 CURRENT STAGE: {nextStep.NextStage}
+{(nextStep.NextStage == CampaignStages.FinalConfirm ? "FINAL CONFIRMATION STAGE: Summarize ALL collected information to the lead and ask if it's correct. If they agree, say goodbye or transfer. If they correct something, update it." : "")}
 {(nextStep.RequiredFieldKey != null ? $"GOAL: Collect the field '{nextStep.RequiredFieldKey}'." : "")}
 NEXT_QUESTION_KEY: {nextStep.NextQuestionKey}
 
@@ -59,7 +60,7 @@ AGENT NAME: {agentName}
 LEAD NAME: {leadName}
 
 CURRENT KNOWN FIELDS:
-{string.Join("\n", fields.Select(kv => $"{kv.Key}={kv.Value}"))}
+{string.Join("\n", fields.Where(kv => kv.Value.Value != null).Select(kv => $"{kv.Key}={kv.Value.Value} (Confirmed={kv.Value.Confirmed})"))}
 
 {(isFirstTurn && isGreetingStage && !string.IsNullOrWhiteSpace(intro) ? $"You just started the call by saying: \"{intro}\". The user responded with what follows." : "")}
 ".Trim();

@@ -4,91 +4,49 @@ public sealed record NextStep(string NextStage, string? NextQuestionKey = null, 
 
 public interface INextStepPlanner
 {
-    NextStep PlanNext(string? campaignCode, string currentStage, IReadOnlyDictionary<string, string> fields);
+    NextStep PlanNext(string? campaignCode, string currentStage, IReadOnlyDictionary<string, Storage.CallFieldValue> fields);
 }
 
 public sealed class NextStepPlanner : INextStepPlanner
 {
-    public NextStep PlanNext(string? campaignCode, string currentStage, IReadOnlyDictionary<string, string> fields)
+    private readonly CampaignRegistry _registry;
+
+    public NextStepPlanner(CampaignRegistry registry)
+    {
+        _registry = registry;
+    }
+
+    public NextStep PlanNext(string? campaignCode, string currentStage, IReadOnlyDictionary<string, Storage.CallFieldValue> fields)
     {
         var code = campaignCode?.ToUpperInvariant() ?? "FE";
+        var profile = _registry.Get(code);
         var order = CampaignStages.GetOrderForCampaign(code);
-        var currentIndex = Array.IndexOf(order, currentStage);
 
-        if (currentIndex == -1) currentIndex = 0;
-
-        // If the current stage has a required field and it's still missing, stay here.
-        var requiredField = GetFieldForStage(code, currentStage);
-        if (requiredField != null && !fields.ContainsKey(requiredField))
+        // 1. Find the first missing required field
+        string? firstMissingField = null;
+        foreach (var field in profile.RequiredFields)
         {
-            return new NextStep(currentStage, currentStage, requiredField);
-        }
-
-        // If the current stage is completed (either field is present or it has no field),
-        // move to the next stage that is not yet completed.
-        for (int i = currentIndex + 1; i < order.Length; i++)
-        {
-            var stage = order[i];
-            var field = GetFieldForStage(code, stage);
-
-            if (field == null || !fields.ContainsKey(field))
+            if (!fields.ContainsKey(field) || fields[field].Value == null || string.IsNullOrWhiteSpace(fields[field].Value?.ToString()))
             {
-                return new NextStep(stage, stage, field);
+                firstMissingField = field;
+                break;
             }
         }
 
-        return new NextStep(order[^1], order[^1], null);
-    }
-
-    private string? GetFieldForStage(string campaignCode, string stage)
-    {
-        return (campaignCode, stage) switch
+        if (firstMissingField != null)
         {
-            ("FE", CampaignStages.FE.Consent) => "consent",
-            ("FE", CampaignStages.FE.QualifyAge) => "age_range",
-            ("FE", CampaignStages.FE.QualifyState) => "state",
-            ("FE", CampaignStages.FE.QualifyCoverage) => "has_coverage",
-            ("FE", CampaignStages.FE.SetCallback) => "callback_time",
+            // Go to the stage mapped for this field
+            if (profile.StageMap.TryGetValue(firstMissingField, out var mappedStage))
+            {
+                return new NextStep(mappedStage, mappedStage, firstMissingField);
+            }
 
-            ("ACA", CampaignStages.ACA.Consent) => "consent",
-            ("ACA", CampaignStages.ACA.QualifyState) => "state",
-            ("ACA", CampaignStages.ACA.QualifyHousehold) => "household_size",
-            ("ACA", CampaignStages.ACA.QualifyIncomeRange) => "income_range",
-            ("ACA", CampaignStages.ACA.QualifyCoverage) => "has_coverage",
-            ("ACA", CampaignStages.ACA.SetCallback) => "callback_time",
+            // If not in stage map, just use a default stage name derived from field or current
+            return new NextStep(currentStage, currentStage, firstMissingField);
+        }
 
-            ("MEDICARE", CampaignStages.Medicare.Consent) => "consent",
-            ("MEDICARE", CampaignStages.Medicare.QualifyState) => "state",
-            ("MEDICARE", CampaignStages.Medicare.ConfirmMedicare) => "has_medicare",
-            ("MEDICARE", CampaignStages.Medicare.PartsABCheck) => "parts_ab",
-            ("MEDICARE", CampaignStages.Medicare.SetCallback) => "callback_time",
-
-            ("SOLAR", CampaignStages.Solar.Consent) => "consent",
-            ("SOLAR", CampaignStages.Solar.QualifyState) => "state",
-            ("SOLAR", CampaignStages.Solar.HomeOwnerCheck) => "home_owner",
-            ("SOLAR", CampaignStages.Solar.RoofTypeOrUtilityBill) => "monthly_bill",
-            ("SOLAR", CampaignStages.Solar.SetCallback) => "callback_time",
-
-            ("AUTOCARE", CampaignStages.AutoCare.Consent) => "consent",
-            ("AUTOCARE", CampaignStages.AutoCare.QualifyState) => "state",
-            ("AUTOCARE", CampaignStages.AutoCare.VehicleInfo) => "car_year_make",
-            ("AUTOCARE", CampaignStages.AutoCare.CurrentCoverage) => "has_insurance",
-            ("AUTOCARE", CampaignStages.AutoCare.SetCallback) => "callback_time",
-
-            ("DOCTOR_APPT", CampaignStages.DoctorAppt.IdentifyNeed) => "needs_appointment",
-            ("DOCTOR_APPT", CampaignStages.DoctorAppt.CollectPatientName) => "patient_name",
-            ("DOCTOR_APPT", CampaignStages.DoctorAppt.CollectPreferredDate) => "preferred_date",
-            ("DOCTOR_APPT", CampaignStages.DoctorAppt.CollectPreferredTime) => "preferred_time",
-            ("DOCTOR_APPT", CampaignStages.DoctorAppt.ConfirmCallbackNumber) => "callback_number",
-
-            ("CAB_BOOKING", CampaignStages.CabBooking.IdentifyNeed) => "needs_cab",
-            ("CAB_BOOKING", CampaignStages.CabBooking.CollectPickupLocation) => "pickup_location",
-            ("CAB_BOOKING", CampaignStages.CabBooking.CollectDropoffLocation) => "dropoff_location",
-            ("CAB_BOOKING", CampaignStages.CabBooking.CollectPickupTime) => "pickup_time",
-            ("CAB_BOOKING", CampaignStages.CabBooking.OptionalPassengers) => "passengers",
-            ("CAB_BOOKING", CampaignStages.CabBooking.ConfirmCallbackNumber) => "callback_number",
-
-            _ => null
-        };
+        // All required fields present -> FinalConfirm (unless already there or at End)
+        if (currentStage == "End") return new NextStep("End");
+        return new NextStep(CampaignStages.FinalConfirm, CampaignStages.FinalConfirm);
     }
 }

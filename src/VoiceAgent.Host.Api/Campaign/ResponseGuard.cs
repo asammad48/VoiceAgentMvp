@@ -4,7 +4,7 @@ namespace VoiceAgent.Host.Api.Campaign;
 
 public sealed class ResponseGuard
 {
-    public AgentAction Enforce(string raw, CampaignProfile profile, string currentStage, IReadOnlyDictionary<string, string> fields, out string? violation)
+    public AgentAction Enforce(string raw, CampaignProfile profile, string currentStage, IReadOnlyDictionary<string, Storage.CallFieldValue> fields, out string? violation)
     {
         violation = null;
         var json = ExtractJsonObject(raw);
@@ -41,7 +41,7 @@ public sealed class ResponseGuard
             }
 
             // Rule: if ConsentConfirmed=true then agent must never ask “is now a bad time?” again
-            var consentConfirmed = fields.TryGetValue("consent", out var c) && (c.Equals("true", StringComparison.OrdinalIgnoreCase) || c.Equals("yes", StringComparison.OrdinalIgnoreCase));
+            var consentConfirmed = fields.TryGetValue("consent", out var c) && (c.Value?.ToString()?.Equals("true", StringComparison.OrdinalIgnoreCase) == true || c.Value?.ToString()?.Equals("yes", StringComparison.OrdinalIgnoreCase) == true);
             if (consentConfirmed && action.Say.Contains("is now a bad time", StringComparison.OrdinalIgnoreCase))
             {
                 violation = "Consent already confirmed. Do not ask if it is a bad time again.";
@@ -51,16 +51,18 @@ public sealed class ResponseGuard
             // Rule: Field conflicts (age/state)
             if (action.Fields != null)
             {
-                if (fields.TryGetValue("age_range", out var oldAge) && action.Fields.TryGetValue("age_range", out var newAge))
+                if (fields.TryGetValue("age", out var oldAgeVal) && oldAgeVal.Value != null && action.Fields.TryGetValue("age", out var newAge))
                 {
+                    var oldAge = oldAgeVal.Value.ToString() ?? "";
                     if (IsAgeConflict(oldAge, newAge))
                     {
                         violation = $"Age conflict detected: was {oldAge}, now {newAge}. Please clarify.";
                         return AgentAction.SafeFallback(currentStage, violation);
                     }
                 }
-                if (fields.TryGetValue("state", out var oldState) && action.Fields.TryGetValue("state", out var newState))
+                if (fields.TryGetValue("state", out var oldStateVal) && oldStateVal.Value != null && action.Fields.TryGetValue("state", out var newState))
                 {
+                    var oldState = oldStateVal.Value.ToString() ?? "";
                     if (!string.Equals(oldState, newState, StringComparison.OrdinalIgnoreCase))
                     {
                         violation = $"State conflict detected: was {oldState}, now {newState}. Please clarify.";

@@ -80,6 +80,15 @@ public sealed class Call
     public string? ExternalCampaignId { get; set; }
     public string? ExternalLeadId { get; set; }
     public string? DispositionCode { get; set; }
+
+    public string? FieldsJson { get; set; } // stores { field: { value, confirmed, ts } }
+}
+
+public sealed class CallFieldValue
+{
+    public object? Value { get; set; }
+    public bool Confirmed { get; set; }
+    public DateTimeOffset Ts { get; set; } = DateTimeOffset.UtcNow;
 }
 
 public sealed class CallTurn
