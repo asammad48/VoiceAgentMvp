@@ -14,10 +14,24 @@ public sealed class PromptBuilder
         bool isFirstTurn,
         NextStep nextStep)
     {
+        var isGreetingStage = nextStep.NextStage == "Greeting";
+        var consentConfirmed = fields.TryGetValue("consent", out var c) && (c.Equals("true", StringComparison.OrdinalIgnoreCase) || c.Equals("yes", StringComparison.OrdinalIgnoreCase));
         var intro = (profile.IntroPitch ?? "").Replace("{lead_name}", leadName).Replace("{agent_name}", agentName);
 
         var fieldsToExtract = new HashSet<string>(profile.RequiredFields);
         if (nextStep.RequiredFieldKey != null) fieldsToExtract.Add(nextStep.RequiredFieldKey);
+
+        var scriptLines = profile.Script;
+        if (!isGreetingStage || consentConfirmed)
+        {
+            // Remove lines that look like greetings or consent requests
+            scriptLines = scriptLines.Where(line =>
+                !line.Contains(agentName, StringComparison.OrdinalIgnoreCase) &&
+                !line.Contains("Hi ", StringComparison.OrdinalIgnoreCase) &&
+                !line.Contains("Hi,", StringComparison.OrdinalIgnoreCase) &&
+                !line.Contains("Hello", StringComparison.OrdinalIgnoreCase) &&
+                !line.Contains("Is now a bad time", StringComparison.OrdinalIgnoreCase)).ToArray();
+        }
 
         var sys = $@"
 You are a phone agent for an {direction} call. Be brief, calm, human.
@@ -37,17 +51,17 @@ Return JSON ONLY with this schema:
 
 CURRENT STAGE: {nextStep.NextStage}
 {(nextStep.RequiredFieldKey != null ? $"GOAL: Collect the field '{nextStep.RequiredFieldKey}'." : "")}
+NEXT_QUESTION_KEY: {nextStep.NextQuestionKey}
 
-SCRIPT (follow this structure):
-- {string.Join("\n- ", profile.Script)}
+{(scriptLines.Length > 0 ? "SCRIPT (follow this structure):\n- " + string.Join("\n- ", scriptLines) : "")}
 
 AGENT NAME: {agentName}
 LEAD NAME: {leadName}
 
-CURRENT KNOWN FIELDS (do not assume missing values):
+CURRENT KNOWN FIELDS:
 {string.Join("\n", fields.Select(kv => $"{kv.Key}={kv.Value}"))}
 
-{(isFirstTurn && !string.IsNullOrWhiteSpace(intro) ? $"You just started the call by saying: \"{intro}\". The user responded with what follows." : "")}
+{(isFirstTurn && isGreetingStage && !string.IsNullOrWhiteSpace(intro) ? $"You just started the call by saying: \"{intro}\". The user responded with what follows." : "")}
 ".Trim();
 
         return new List<ChatTurn>

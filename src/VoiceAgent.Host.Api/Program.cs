@@ -235,7 +235,7 @@ app.MapPost("/v1/calls/claim", async (TenantContext tenant, AppDbContext db, Cam
     });
 }).WithOpenApi();
 
-app.MapPost("/v1/calls/{callId:guid}/next", async (Guid callId, [FromBody] NextRequest req, TenantContext tenant, AppDbContext db, CampaignRegistry registry, PromptBuilder pb, ResponseGuard guard, ILlmProvider llm, IConversationStateStore stateStore, INextStepPlanner planner) =>
+app.MapPost("/v1/calls/{callId:guid}/next", async (Guid callId, [FromBody] NextRequest req, TenantContext tenant, AppDbContext db, CampaignRegistry registry, PromptBuilder pb, ResponseGuard guard, ILlmProvider llm, IConversationStateStore stateStore, INextStepPlanner planner, ILogger<Program> logger) =>
 {
     var call = await db.Calls.FirstOrDefaultAsync(x => x.TenantId == tenant.TenantId && x.Id == callId);
     if (call is null) return Results.NotFound(new { error = "call not found" });
@@ -248,17 +248,40 @@ app.MapPost("/v1/calls/{callId:guid}/next", async (Guid callId, [FromBody] NextR
     var currentStage = stateStore.GetCurrentStage(call);
     var nextStep = planner.PlanNext(call.InboundUseCaseCode ?? call.CampaignCode, currentStage, fields);
 
+    var missingFields = profile.RequiredFields.Where(f => !fields.ContainsKey(f)).ToList();
+    logger.LogInformation("[TURN DEBUG] Call: {CallId}, CurrentStage: {CurrentStage}, MissingFields: {MissingFields}, NextStageGoal: {NextStageGoal}",
+        call.Id, currentStage, string.Join(",", missingFields), nextStep.NextStage);
+
     var turnCount = await db.CallTurns.CountAsync(x => x.CallId == call.Id && x.Role == "user");
     var turns = pb.BuildTurns(profile, call.Direction.ToString(), agent.DisplayName, lead.Name, fields, req.Transcript ?? "", turnCount == 0, nextStep);
 
     db.CallTurns.Add(new CallTurn { Id = Guid.NewGuid(), TenantId = tenant.TenantId, CallId = call.Id, Role = "user", Text = req.Transcript ?? "" });
     var raw = await llm.CompleteAsync(turns, CancellationToken.None);
-    var action = guard.Enforce(raw, profile);
+    var action = guard.Enforce(raw, profile, currentStage, fields, out var violation);
+
+    string? finalViolation = violation;
+    if (violation != null)
+    {
+        logger.LogWarning("[TURN DEBUG] Guard violation: {Violation}. Regenerating...", violation);
+        turns.Add(new ChatTurn(ChatRole.Assistant, raw));
+        turns.Add(new ChatTurn(ChatRole.System, $"CONSTRAINTS VIOLATED: {violation}. Please correct your response and follow the schema."));
+        raw = await llm.CompleteAsync(turns, CancellationToken.None);
+        action = guard.Enforce(raw, profile, currentStage, fields, out var secondViolation);
+        finalViolation = secondViolation;
+        if (secondViolation != null)
+        {
+            logger.LogError("[TURN DEBUG] Guard violation persisted: {Violation}. Using fallback.", secondViolation);
+        }
+    }
+
+    logger.LogInformation("[TURN DEBUG] ModelIntent: {Intent}, NextStageChosen: {NextStage}", action.Intent, nextStep.NextStage);
+
     db.CallTurns.Add(new CallTurn { Id = Guid.NewGuid(), TenantId = tenant.TenantId, CallId = call.Id, Role = "assistant", Text = action.Say ?? "" });
 
-    // Update stage if it changed
-    if (nextStep.NextStage != currentStage)
+    // Update stage if it changed AND no final violation occurred
+    if (finalViolation == null && nextStep.NextStage != currentStage)
     {
+        logger.LogInformation("[TURN DEBUG] Advancing stage from {OldStage} to {NewStage}", currentStage, nextStep.NextStage);
         stateStore.SetCurrentStage(call, nextStep.NextStage);
     }
 
