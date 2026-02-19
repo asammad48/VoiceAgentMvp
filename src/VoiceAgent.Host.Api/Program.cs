@@ -258,7 +258,10 @@ app.MapPost("/v1/calls/{callId:guid}/next", async (Guid callId, [FromBody] NextR
     {
         foreach (var kv in req.Fields)
         {
-            if (!fields.ContainsKey(kv.Key)) fields[kv.Key] = new CallFieldValue { Value = kv.Value, Confirmed = true };
+            if (!fields.ContainsKey(kv.Key) && !string.IsNullOrWhiteSpace(kv.Value))
+            {
+                fields[kv.Key] = new CallFieldValue { Value = kv.Value, Confirmed = true };
+            }
         }
     }
 
