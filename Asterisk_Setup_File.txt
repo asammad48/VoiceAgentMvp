@@ -4,12 +4,16 @@ From your project root:
 
 ```bash
 # Add migration
+dotnet ef migrations add FeildsAdded --project src/VoiceAgent.Host.Api --startup-project src/VoiceAgent.Host.Api
+
 dotnet ef migrations add InitialCreate \
 --project src/VoiceAgent.Host.Api \
 --startup-project src/VoiceAgent.Host.Api \
 --output-dir Infrastructure/Persistence/Migrations
 
 # Update database
+dotnet ef database update --project src/VoiceAgent.Host.Api --startup-project src/VoiceAgent.Host.Api
+
 dotnet ef database update \
 --project src/VoiceAgent.Host.Api \
 --startup-project src/VoiceAgent.Host.Api
