@@ -49,8 +49,16 @@ public sealed class ResponseGuard
                 return AgentAction.SafeFallback(currentStage);
             }
 
-            // Rule: if ConsentConfirmed=true then agent must never ask “is now a bad time?” again
             var consentConfirmed = fields.TryGetValue("consent", out var c) && (c.Value?.ToString()?.Equals("true", StringComparison.OrdinalIgnoreCase) == true || c.Value?.ToString()?.Equals("yes", StringComparison.OrdinalIgnoreCase) == true);
+
+            // Rule: if consent confirmed, no more consent intent
+            if (consentConfirmed && action.Intent.Equals("consent", StringComparison.OrdinalIgnoreCase))
+            {
+                violation = "Consent already confirmed. Do not use 'consent' intent again.";
+                return AgentAction.SafeFallback(currentStage);
+            }
+
+            // Rule: if ConsentConfirmed=true then agent must never ask “is now a bad time?” again
             if (consentConfirmed && action.Say.Contains("is now a bad time", StringComparison.OrdinalIgnoreCase))
             {
                 violation = "Consent already confirmed. Do not ask if it is a bad time again.";

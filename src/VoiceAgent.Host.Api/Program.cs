@@ -55,6 +55,7 @@ builder.Services.AddSingleton<IFieldPolicyEngine, FieldPolicyEngine>();
 builder.Services.AddSingleton<ResponseGuard>();
 builder.Services.AddSingleton<IConversationStateStore, DbConversationStateStore>();
 builder.Services.AddSingleton<INextStepPlanner, NextStepPlanner>();
+builder.Services.AddSingleton<EligibilityEvaluator>();
 
 builder.Services.AddDbContext<AppDbContext>(opt =>
 {
@@ -238,7 +239,7 @@ app.MapPost("/v1/calls/claim", async (TenantContext tenant, AppDbContext db, Cam
     });
 }).WithOpenApi();
 
-app.MapPost("/v1/calls/{callId:guid}/next", async (Guid callId, [FromBody] NextRequest req, TenantContext tenant, AppDbContext db, CampaignRegistry registry, PromptBuilder pb, ResponseGuard guard, ILlmProvider llm, IConversationStateStore stateStore, INextStepPlanner planner, IFieldPolicyEngine fieldPolicy, ILogger<Program> logger) =>
+app.MapPost("/v1/calls/{callId:guid}/next", async (Guid callId, [FromBody] NextRequest req, TenantContext tenant, AppDbContext db, CampaignRegistry registry, PromptBuilder pb, ResponseGuard guard, ILlmProvider llm, IConversationStateStore stateStore, INextStepPlanner planner, IFieldPolicyEngine fieldPolicy, EligibilityEvaluator eligibility, ILogger<Program> logger) =>
 {
     var call = await db.Calls.FirstOrDefaultAsync(x => x.TenantId == tenant.TenantId && x.Id == callId);
     if (call is null) return Results.NotFound(new { error = "call not found" });
@@ -266,6 +267,32 @@ app.MapPost("/v1/calls/{callId:guid}/next", async (Guid callId, [FromBody] NextR
     }
 
     var currentStage = stateStore.GetCurrentStage(call);
+    var transcript = req.Transcript ?? "";
+    var userTurn = new CallTurn { Id = Guid.NewGuid(), TenantId = tenant.TenantId, CallId = call.Id, Role = "user", Text = transcript };
+    db.CallTurns.Add(userTurn);
+
+    // NEW: Local phrase detection for DNC/Abuse
+    if (IsAbusiveOrDnc(transcript))
+    {
+        logger.LogInformation("[TURN DEBUG] Local DNC/Abuse detected: {Transcript}", transcript);
+        call.Status = CallStatus.Dnc;
+        lead.Status = CallStatus.Dnc;
+        call.EndedAt = DateTimeOffset.UtcNow;
+        if (!await db.DoNotCalls.AnyAsync(x => x.TenantId == tenant.TenantId && x.Phone == lead.Phone))
+            db.DoNotCalls.Add(new DoNotCall { Id = Guid.NewGuid(), TenantId = tenant.TenantId, Phone = lead.Phone, Reason = "Detected by local phrase filter: " + transcript });
+
+        var dncAction = new AgentAction
+        {
+            Say = "I understand. I will remove you from our list immediately. Have a good day.",
+            Intent = "dncl",
+            NextStep = "end call due to DNC request"
+        };
+        db.CallTurns.Add(new CallTurn { Id = Guid.NewGuid(), TenantId = tenant.TenantId, CallId = call.Id, Role = "assistant", Text = dncAction.Say });
+
+        await db.SaveChangesAsync();
+        return Results.Ok(dncAction);
+    }
+
     var nextStep = planner.PlanNext(call.InboundUseCaseCode ?? call.CampaignCode, currentStage, fields);
 
     var missingFields = profile.RequiredFields.Where(f => !fields.ContainsKey(f) || fields[f].Value == null).ToList();
@@ -273,10 +300,8 @@ app.MapPost("/v1/calls/{callId:guid}/next", async (Guid callId, [FromBody] NextR
         call.Id, currentStage, string.Join(",", missingFields), nextStep.NextStage);
 
     var turnCount = await db.CallTurns.CountAsync(x => x.CallId == call.Id && x.Role == "user");
-    var turns = pb.BuildTurns(profile, call.Direction.ToString(), agent.DisplayName, lead.Name, fields, req.Transcript ?? "", turnCount == 0, nextStep);
+    var turns = pb.BuildTurns(profile, call.Direction.ToString(), agent.DisplayName, lead.Name, fields, transcript, turnCount == 0, nextStep);
 
-    var userTurn = new CallTurn { Id = Guid.NewGuid(), TenantId = tenant.TenantId, CallId = call.Id, Role = "user", Text = req.Transcript ?? "" };
-    db.CallTurns.Add(userTurn);
     var raw = await llm.CompleteAsync(turns, CancellationToken.None);
     var action = guard.Enforce(raw, profile, currentStage, fields, out var violation);
 
@@ -355,6 +380,41 @@ app.MapPost("/v1/calls/{callId:guid}/next", async (Guid callId, [FromBody] NextR
         }
     }
 
+    // NEW: Run eligibility check after updating fields
+    var eligResult = eligibility.Evaluate(profile, fields);
+    if (!eligResult.Eligible)
+    {
+        logger.LogInformation("[TURN DEBUG] Call {CallId} disqualified: {Reason}", call.Id, eligResult.Reason);
+        call.Status = CallStatus.Disqualified;
+        call.Notes = eligResult.Reason;
+        lead.Status = CallStatus.Disqualified;
+        call.EndedAt = DateTimeOffset.UtcNow;
+        call.FieldsJson = JsonSerializer.Serialize(fields);
+
+        db.CallFieldHistories.Add(new CallFieldHistory
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenant.TenantId,
+            CallId = call.Id,
+            FieldName = "disqualified",
+            OldValue = "false",
+            NewValue = "true",
+            Reason = eligResult.Reason ?? "Not eligible",
+            TurnId = userTurn.Id
+        });
+
+        var disqAction = new AgentAction
+        {
+            Say = $"I am sorry, but it appears you are not eligible for this program at this time. {eligResult.Reason}. Thank you for your time, and have a great day.",
+            Intent = "end",
+            NextStep = "end call due to disqualification"
+        };
+        db.CallTurns.Add(new CallTurn { Id = Guid.NewGuid(), TenantId = tenant.TenantId, CallId = call.Id, Role = "assistant", Text = disqAction.Say });
+
+        await db.SaveChangesAsync();
+        return Results.Ok(disqAction);
+    }
+
     // Handle FinalConfirm logic
     var intent = (action.Intent ?? "").ToLowerInvariant();
     if (currentStage == CampaignStages.FinalConfirm)
@@ -364,6 +424,11 @@ app.MapPost("/v1/calls/{callId:guid}/next", async (Guid callId, [FromBody] NextR
         {
             foreach (var f in profile.RequiredFields)
             {
+                profile.FieldPolicies.TryGetValue(f, out var policy);
+                // Never => skip confirmation entirely
+                // ImmediateOnConflict => skip if not already confirmed (meaning no conflict occurred or it wasn't a repeat)
+                if (policy?.ConfirmMode == "Never" || policy?.ConfirmMode == "ImmediateOnConflict") continue;
+
                 if (fields.TryGetValue(f, out var val) && !val.Confirmed)
                 {
                     val.Confirmed = true;
@@ -489,6 +554,13 @@ app.MapPost("/v1/stt", async ([FromForm] SttFormRequest req, DeepgramPrerecorded
 }).DisableAntiforgery().WithOpenApi();
 
 app.Run();
+
+static bool IsAbusiveOrDnc(string text)
+{
+    var t = text.ToLowerInvariant();
+    return t.Contains("don't call") || t.Contains("stop calling") || t.Contains("remove me") || t.Contains("do not call") ||
+           t.Contains("fuck") || t.Contains("shit") || t.Contains("asshole") || t.Contains("bitch");
+}
 
 public sealed record CreateTenantRequest(string? Name);
 public sealed record CreateAgentRequest(string? DisplayName, string? DefaultCampaignCode);

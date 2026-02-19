@@ -20,6 +20,7 @@ public sealed class PromptBuilder
 
         var fieldsToExtract = new HashSet<string>(profile.RequiredFields);
         if (nextStep.RequiredFieldKey != null) fieldsToExtract.Add(nextStep.RequiredFieldKey);
+        if (nextStep.SecondaryFieldKey != null) fieldsToExtract.Add(nextStep.SecondaryFieldKey);
 
         var scriptLines = profile.Script;
         if (!isGreetingStage || consentConfirmed)
@@ -51,7 +52,8 @@ Return JSON ONLY with this schema:
 
 CURRENT STAGE: {nextStep.NextStage}
 {(nextStep.NextStage == CampaignStages.FinalConfirm ? "FINAL CONFIRMATION STAGE: Summarize ALL collected information to the lead and ask if it's correct. If they agree, say goodbye or transfer. If they correct something, update it." : "")}
-{(nextStep.RequiredFieldKey != null ? $"GOAL: Collect the field '{nextStep.RequiredFieldKey}'." : "")}
+{(nextStep.RequiredFieldKey != null ? $"GOAL: Collect the field '{nextStep.RequiredFieldKey}'{(nextStep.SecondaryFieldKey != null ? $" and '{nextStep.SecondaryFieldKey}'" : "")}." : "")}
+{(nextStep.AskTemplate != null ? $"SUGGESTED QUESTION: {nextStep.AskTemplate}" : "")}
 NEXT_QUESTION_KEY: {nextStep.NextQuestionKey}
 
 {(scriptLines.Count > 0 ? "SCRIPT (follow this structure):\n- " + string.Join("\n- ", scriptLines) : "")}
