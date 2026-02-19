@@ -23,10 +23,11 @@ public sealed class NextStepPlanner : INextStepPlanner
         var order = CampaignStages.GetOrderForCampaign(code);
 
         // 1. Find the first missing required field
+        // RULE: If value exists (even unconfirmed), do not ask again — only confirm at FinalConfirm or if conflict detected.
         string? firstMissingField = null;
         foreach (var field in profile.RequiredFields)
         {
-            if (!fields.ContainsKey(field) || fields[field].Value == null || string.IsNullOrWhiteSpace(fields[field].Value?.ToString()))
+            if (!fields.TryGetValue(field, out var val) || val.Value == null || string.IsNullOrWhiteSpace(val.Value.ToString()))
             {
                 firstMissingField = field;
                 break;

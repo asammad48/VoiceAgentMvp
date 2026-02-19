@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using VoiceAgent.Domain.Models.Conversation;
 using VoiceAgent.Domain.Ports;
+using VoiceAgent.Domain.Services;
 using VoiceAgent.Host.Api.Campaign;
 using VoiceAgent.Host.Api.Storage;
 using VoiceAgent.Host.Api.Tenancy;
@@ -50,6 +51,7 @@ builder.Services.AddSwaggerGen(o =>
 builder.Services.AddSingleton<TenantContext>();
 builder.Services.AddSingleton<CampaignRegistry>();
 builder.Services.AddSingleton<PromptBuilder>();
+builder.Services.AddSingleton<IFieldPolicyEngine, FieldPolicyEngine>();
 builder.Services.AddSingleton<ResponseGuard>();
 builder.Services.AddSingleton<IConversationStateStore, DbConversationStateStore>();
 builder.Services.AddSingleton<INextStepPlanner, NextStepPlanner>();
@@ -236,7 +238,7 @@ app.MapPost("/v1/calls/claim", async (TenantContext tenant, AppDbContext db, Cam
     });
 }).WithOpenApi();
 
-app.MapPost("/v1/calls/{callId:guid}/next", async (Guid callId, [FromBody] NextRequest req, TenantContext tenant, AppDbContext db, CampaignRegistry registry, PromptBuilder pb, ResponseGuard guard, ILlmProvider llm, IConversationStateStore stateStore, INextStepPlanner planner, ILogger<Program> logger) =>
+app.MapPost("/v1/calls/{callId:guid}/next", async (Guid callId, [FromBody] NextRequest req, TenantContext tenant, AppDbContext db, CampaignRegistry registry, PromptBuilder pb, ResponseGuard guard, ILlmProvider llm, IConversationStateStore stateStore, INextStepPlanner planner, IFieldPolicyEngine fieldPolicy, ILogger<Program> logger) =>
 {
     var call = await db.Calls.FirstOrDefaultAsync(x => x.TenantId == tenant.TenantId && x.Id == callId);
     if (call is null) return Results.NotFound(new { error = "call not found" });
@@ -270,7 +272,8 @@ app.MapPost("/v1/calls/{callId:guid}/next", async (Guid callId, [FromBody] NextR
     var turnCount = await db.CallTurns.CountAsync(x => x.CallId == call.Id && x.Role == "user");
     var turns = pb.BuildTurns(profile, call.Direction.ToString(), agent.DisplayName, lead.Name, fields, req.Transcript ?? "", turnCount == 0, nextStep);
 
-    db.CallTurns.Add(new CallTurn { Id = Guid.NewGuid(), TenantId = tenant.TenantId, CallId = call.Id, Role = "user", Text = req.Transcript ?? "" });
+    var userTurn = new CallTurn { Id = Guid.NewGuid(), TenantId = tenant.TenantId, CallId = call.Id, Role = "user", Text = req.Transcript ?? "" };
+    db.CallTurns.Add(userTurn);
     var raw = await llm.CompleteAsync(turns, CancellationToken.None);
     var action = guard.Enforce(raw, profile, currentStage, fields, out var violation);
 
@@ -291,7 +294,8 @@ app.MapPost("/v1/calls/{callId:guid}/next", async (Guid callId, [FromBody] NextR
 
     logger.LogInformation("[TURN DEBUG] ModelIntent: {Intent}, NextStageChosen: {NextStage}", action.Intent, nextStep.NextStage);
 
-    db.CallTurns.Add(new CallTurn { Id = Guid.NewGuid(), TenantId = tenant.TenantId, CallId = call.Id, Role = "assistant", Text = action.Say ?? "" });
+    var assistantTurn = new CallTurn { Id = Guid.NewGuid(), TenantId = tenant.TenantId, CallId = call.Id, Role = "assistant", Text = action.Say ?? "" };
+    db.CallTurns.Add(assistantTurn);
 
     // Update stage if it changed AND no final violation occurred
     if (finalViolation == null && nextStep.NextStage != currentStage)
@@ -300,25 +304,51 @@ app.MapPost("/v1/calls/{callId:guid}/next", async (Guid callId, [FromBody] NextR
         stateStore.SetCurrentStage(call, nextStep.NextStage);
     }
 
-    if (action.Fields is not null)
+    if (action.Fields is not null && action.Fields.Count > 0)
     {
-        foreach (var kv in action.Fields)
+        var domainFields = fields.ToDictionary(k => k.Key, v => new DomainFieldValue { Value = v.Value.Value, Confirmed = v.Value.Confirmed });
+        var updates = fieldPolicy.ProcessUpdates(call.CampaignCode, currentStage, domainFields, action.Fields);
+
+        foreach (var up in updates)
         {
-            var key = kv.Key.Trim();
-            if (string.IsNullOrWhiteSpace(key) || kv.Value is null) continue;
-
-            // Rule: if value != null AND confirmed=true -> NEVER ask again (and don't overwrite with unconfirmed)
-            if (fields.TryGetValue(key, out var existing) && existing.Confirmed && !nextStep.NextStage.Equals(CampaignStages.FinalConfirm))
+            if (up.Accepted)
             {
-                continue;
+                var oldVal = fields.TryGetValue(up.FieldName, out var existing) ? existing.Value?.ToString() : null;
+                var newVal = up.NewValue?.ToString();
+
+                fields[up.FieldName] = new CallFieldValue
+                {
+                    Value = up.NewValue,
+                    Confirmed = up.Confirmed,
+                    Ts = DateTimeOffset.UtcNow
+                };
+
+                if (oldVal != newVal)
+                {
+                    db.CallFieldHistories.Add(new CallFieldHistory
+                    {
+                        Id = Guid.NewGuid(),
+                        TenantId = tenant.TenantId,
+                        CallId = call.Id,
+                        FieldName = up.FieldName,
+                        OldValue = oldVal,
+                        NewValue = newVal,
+                        Reason = up.Reason,
+                        TurnId = userTurn.Id
+                    });
+                }
+
+                // Sync with CallField table for redundant storage
+                var existingRelational = await db.CallFields.FirstOrDefaultAsync(x => x.CallId == call.Id && x.Key == up.FieldName);
+                if (existingRelational == null)
+                {
+                    db.CallFields.Add(new CallField { Id = Guid.NewGuid(), TenantId = tenant.TenantId, CallId = call.Id, Key = up.FieldName, Value = newVal ?? "" });
+                }
+                else
+                {
+                    existingRelational.Value = newVal ?? "";
+                }
             }
-
-            fields[key] = new CallFieldValue
-            {
-                Value = kv.Value.Trim(),
-                Confirmed = false, // mark confirmed=true only in FinalConfirm or special cases
-                Ts = DateTimeOffset.UtcNow
-            };
         }
     }
 
@@ -331,18 +361,43 @@ app.MapPost("/v1/calls/{callId:guid}/next", async (Guid callId, [FromBody] NextR
         {
             foreach (var f in profile.RequiredFields)
             {
-                if (fields.TryGetValue(f, out var val)) val.Confirmed = true;
+                if (fields.TryGetValue(f, out var val) && !val.Confirmed)
+                {
+                    val.Confirmed = true;
+                    db.CallFieldHistories.Add(new CallFieldHistory
+                    {
+                        Id = Guid.NewGuid(),
+                        TenantId = tenant.TenantId,
+                        CallId = call.Id,
+                        FieldName = f,
+                        OldValue = val.Value?.ToString(),
+                        NewValue = val.Value?.ToString(),
+                        Reason = "final_confirmation",
+                        TurnId = userTurn.Id
+                    });
+                }
             }
         }
     }
 
     // Special case for consent (treat as field)
-    if (fields.TryGetValue("consent", out var consentVal) && consentVal.Value != null)
+    if (fields.TryGetValue("consent", out var consentVal) && consentVal.Value != null && !consentVal.Confirmed)
     {
         var valStr = consentVal.Value.ToString()?.ToLowerInvariant();
         if (valStr == "true" || valStr == "yes" || valStr == "confirmed")
         {
             consentVal.Confirmed = true;
+            db.CallFieldHistories.Add(new CallFieldHistory
+            {
+                Id = Guid.NewGuid(),
+                TenantId = tenant.TenantId,
+                CallId = call.Id,
+                FieldName = "consent",
+                OldValue = "false",
+                NewValue = "true",
+                Reason = "consent_confirmed",
+                TurnId = userTurn.Id
+            });
         }
     }
 

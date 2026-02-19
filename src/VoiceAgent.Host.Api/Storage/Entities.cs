@@ -110,6 +110,19 @@ public sealed class CallField
     public string Value { get; set; } = "";
 }
 
+public sealed class CallFieldHistory
+{
+    public Guid Id { get; set; }
+    public Guid TenantId { get; set; }
+    public Guid CallId { get; set; }
+    public string FieldName { get; set; } = "";
+    public string? OldValue { get; set; }
+    public string? NewValue { get; set; }
+    public string Reason { get; set; } = "";
+    public Guid? TurnId { get; set; }
+    public DateTimeOffset Timestamp { get; set; } = DateTimeOffset.UtcNow;
+}
+
 public sealed class DoNotCall
 {
     public Guid Id { get; set; }

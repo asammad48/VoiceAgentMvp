@@ -1,9 +1,18 @@
 using System.Text.Json;
+using VoiceAgent.Domain.Models.Conversation;
+using VoiceAgent.Domain.Services;
 
 namespace VoiceAgent.Host.Api.Campaign;
 
 public sealed class ResponseGuard
 {
+    private readonly IFieldPolicyEngine _fieldPolicy;
+
+    public ResponseGuard(IFieldPolicyEngine fieldPolicy)
+    {
+        _fieldPolicy = fieldPolicy;
+    }
+
     public AgentAction Enforce(string raw, CampaignProfile profile, string currentStage, IReadOnlyDictionary<string, Storage.CallFieldValue> fields, out string? violation)
     {
         violation = null;
@@ -48,26 +57,17 @@ public sealed class ResponseGuard
                 return AgentAction.SafeFallback(currentStage);
             }
 
-            // Rule: Field conflicts (age/state)
-            if (action.Fields != null)
+            // Rule: Generalized Field conflicts using FieldPolicyEngine
+            if (action.Fields != null && action.Fields.Count > 0)
             {
-                if (fields.TryGetValue("age", out var oldAgeVal) && oldAgeVal.Value != null && action.Fields.TryGetValue("age", out var newAge))
+                var domainFields = fields.ToDictionary(k => k.Key, v => new DomainFieldValue { Value = v.Value.Value, Confirmed = v.Value.Confirmed });
+                var results = _fieldPolicy.ProcessUpdates(profile.Name, currentStage, domainFields, action.Fields);
+
+                var conflict = results.FirstOrDefault(r => r.Conflict);
+                if (conflict != null)
                 {
-                    var oldAge = oldAgeVal.Value.ToString() ?? "";
-                    if (IsAgeConflict(oldAge, newAge))
-                    {
-                        violation = $"Age conflict detected: was {oldAge}, now {newAge}. Please clarify.";
-                        return AgentAction.SafeFallback(currentStage, violation);
-                    }
-                }
-                if (fields.TryGetValue("state", out var oldStateVal) && oldStateVal.Value != null && action.Fields.TryGetValue("state", out var newState))
-                {
-                    var oldState = oldStateVal.Value.ToString() ?? "";
-                    if (!string.Equals(oldState, newState, StringComparison.OrdinalIgnoreCase))
-                    {
-                        violation = $"State conflict detected: was {oldState}, now {newState}. Please clarify.";
-                        return AgentAction.SafeFallback(currentStage, violation);
-                    }
+                    violation = conflict.ClarificationQuestion ?? $"{conflict.FieldName} conflict detected. Please clarify.";
+                    return AgentAction.SafeFallback(currentStage, violation);
                 }
             }
 
@@ -98,37 +98,6 @@ public sealed class ResponseGuard
         }
     }
 
-    private bool IsAgeConflict(string oldAge, string newAge)
-    {
-        // Simple heuristic: if they are significantly different numbers
-        // Extract numbers from strings
-        var oldNums = GetNumbers(oldAge);
-        var newNums = GetNumbers(newAge);
-        if (oldNums.Count == 0 || newNums.Count == 0) return false;
-
-        // If any number in new set is very different from any in old set
-        foreach (var n in newNums)
-        {
-            bool foundClose = false;
-            foreach (var o in oldNums)
-            {
-                if (Math.Abs(n - o) <= 5) { foundClose = true; break; }
-            }
-            if (!foundClose) return true;
-        }
-        return false;
-    }
-
-    private List<int> GetNumbers(string input)
-    {
-        var matches = System.Text.RegularExpressions.Regex.Matches(input, @"\d+");
-        var list = new List<int>();
-        foreach (System.Text.RegularExpressions.Match m in matches)
-        {
-            if (int.TryParse(m.Value, out var val)) list.Add(val);
-        }
-        return list;
-    }
 
     private static string? ExtractJsonObject(string raw)
     {
