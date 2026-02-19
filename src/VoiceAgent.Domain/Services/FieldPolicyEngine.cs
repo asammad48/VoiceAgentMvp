@@ -44,8 +44,9 @@ public sealed class FieldPolicyEngine : IFieldPolicyEngine
             };
 
             var isSameValue = IsSameValue(fieldName, existing?.Value, normalizedValue);
+            var hasExistingValue = existing != null && existing.Value != null && !string.IsNullOrWhiteSpace(existing.Value.ToString());
 
-            if (existing != null && existing.Confirmed)
+            if (existing != null && existing.Confirmed && hasExistingValue)
             {
                 if (!isSameValue)
                 {
@@ -62,7 +63,7 @@ public sealed class FieldPolicyEngine : IFieldPolicyEngine
                     result.Reason = "match_confirmed";
                 }
             }
-            else if (existing != null && !existing.Confirmed)
+            else if (existing != null && !existing.Confirmed && hasExistingValue)
             {
                 if (!isSameValue)
                 {
@@ -81,7 +82,7 @@ public sealed class FieldPolicyEngine : IFieldPolicyEngine
             }
             else
             {
-                // Initial capture
+                // Initial capture (or existing value was null/empty)
                 result.Accepted = true;
                 result.Confirmed = false; // Initial is unconfirmed
                 result.Reason = "initial_capture";
