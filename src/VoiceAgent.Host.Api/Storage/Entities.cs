@@ -18,7 +18,8 @@ public enum CallStatus
     FailedProvider = 13,
     AgentHungUp = 14,
     LeadHungUp = 15,
-    DncBlocked = 16
+    DncBlocked = 16,
+    Disqualified = 17
 }
 
 public enum CallDirection

@@ -115,7 +115,7 @@ public sealed class AsteriskAriTelephonyControl : ITelephonyControl
                 {
                     if (bridgeId != null) await _ari.DeleteBridgeAsync(bridgeId, ct);
                     if (id != null) await _ari.HangupAsync(id, ct);
-                    _active.TryRemove(id, out _);
+                    if (id != null) _active.TryRemove(id, out _);
                 }
             }, ct);
         }

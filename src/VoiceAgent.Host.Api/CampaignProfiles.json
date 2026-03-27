@@ -14,7 +14,22 @@
     },
     "bannedPhrases": [ "guaranteed", "free", "government", "medicare office", "approved for sure", "$" ],
     "systemAddon": "Campaign = Final Expense (FE). Goal = qualify and schedule a licensed agent callback.",
-    "script": [ "Hi, is this {lead_name}? My name is {agent_name}. I'm calling about your final expense coverage request. Is now a bad time?" ]
+    "script": [ "Hi, is this {lead_name}? My name is {agent_name}. I'm calling about your final expense coverage request. Is now a bad time?" ],
+    "EligibilityRules": [
+      { "field": "age", "op": "between", "min": 50, "max": 85, "reason": "Age not in eligible range (50-85)" }
+    ],
+    "QuestionRules": {
+      "QualifyCoverage": [
+        { "when": { "field": "has_coverage", "op": "eq", "value": "true" }, "ask": "What type of coverage do you have and what is the amount?", "targets": [ "coverage_type", "coverage_amount_range" ] },
+        { "when": { "field": "has_coverage", "op": "eq", "value": "false" }, "ask": "Are you interested in getting coverage to protect your family?", "targets": [ "interest_level" ] },
+        { "when": "default", "ask": "Do you currently have any life insurance or final expense coverage?", "targets": [ "has_coverage" ] }
+      ]
+    },
+    "FieldPolicies": {
+      "age": { "confirmMode": "EndOnly" },
+      "state": { "confirmMode": "EndOnly" },
+      "has_coverage": { "confirmMode": "ImmediateOnConflict" }
+    }
   },
   "ACA": {
     "name": "ACA Marketplace",
@@ -117,6 +132,11 @@
     },
     "bannedPhrases": [ "guaranteed time", "price match", "$" ],
     "systemAddon": "Inbound = Cab Booking. Goal = capture pickup/dropoff and time.",
-    "script": [ "Hi! Where are we picking you up from and where are you headed?" ]
+    "script": [ "Hi! Where are we picking you up from and where are you headed?" ],
+    "FieldPolicies": {
+      "passengers": { "confirmMode": "Never" },
+      "notes": { "confirmMode": "Never" },
+      "callback_number": { "confirmMode": "Always" }
+    }
   }
 }
